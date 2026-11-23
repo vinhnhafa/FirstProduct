@@ -13,9 +13,8 @@ import {
 import {
   getFirestore,
   doc,
-  getDoc,
   getDocFromServer,
-  setDoc,
+  runTransaction,
   serverTimestamp,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
@@ -98,49 +97,88 @@ function resolveProviderTag(user: User): 'google.com' | 'password' | 'phone' | '
   return 'other';
 }
 
+const pendingProfileSyncs = new Map<string, Promise<void>>();
+
 export async function syncUserProfileToFirestore(user: User): Promise<void> {
-  const profilePath = `users/${user.uid}`;
-  const privatePath = `users/${user.uid}/private/account`;
-  const displayName = (user.displayName || user.email?.split('@')[0] || 'Ca sĩ').slice(0, 48);
-  const authProvider = resolveProviderTag(user);
-
-  try {
-    const ref = doc(db, 'users', user.uid);
-    const snap = await getDoc(ref);
-    const profilePayload: Record<string, unknown> = {
-      uid: user.uid,
-      displayName,
-      authProvider,
-      updatedAt: serverTimestamp(),
-    };
-    if (user.photoURL && user.photoURL.length <= 512) {
-      profilePayload.photoUrl = user.photoURL;
-    }
-    if (!snap.exists()) {
-      profilePayload.createdAt = serverTimestamp();
-    }
-    await setDoc(ref, profilePayload, { merge: true });
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, profilePath);
+  const existingSync = pendingProfileSyncs.get(user.uid);
+  if (existingSync) {
+    return existingSync;
   }
 
-  if (user.email) {
+  const syncPromise = (async () => {
+    const profilePath = `users/${user.uid}`;
+    const privatePath = `users/${user.uid}/private/account`;
+    const displayName = (
+      user.displayName?.trim() ||
+      user.email?.split('@')[0]?.trim() ||
+      'Ca sĩ'
+    ).slice(0, 48);
+    const authProvider = resolveProviderTag(user);
+    const cleanPhotoUrl =
+      user.photoURL && user.photoURL.length <= 512 ? user.photoURL : undefined;
+
     try {
-      const privRef = doc(db, 'users', user.uid, 'private', 'account');
-      const privSnap = await getDoc(privRef);
-      const privPayload: Record<string, unknown> = {
-        uid: user.uid,
-        email: user.email.slice(0, 160),
-        updatedAt: serverTimestamp(),
-      };
-      if (!privSnap.exists()) {
-        privPayload.createdAt = serverTimestamp();
-      }
-      await setDoc(privRef, privPayload, { merge: true });
+      const ref = doc(db, 'users', user.uid);
+      await runTransaction(db, async (tx) => {
+        const snap = await tx.get(ref);
+        if (!snap.exists()) {
+          const createPayload: Record<string, unknown> = {
+            uid: user.uid,
+            displayName,
+            authProvider,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          };
+          if (cleanPhotoUrl) {
+            createPayload.photoUrl = cleanPhotoUrl;
+          }
+          tx.set(ref, createPayload);
+        } else {
+          const updatePayload: Record<string, unknown> = {
+            displayName,
+            authProvider,
+            updatedAt: serverTimestamp(),
+          };
+          if (cleanPhotoUrl) {
+            updatePayload.photoUrl = cleanPhotoUrl;
+          }
+          tx.update(ref, updatePayload);
+        }
+      });
     } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, privatePath);
+      handleFirestoreError(error, OperationType.WRITE, profilePath);
     }
-  }
+
+    if (user.email) {
+      const cleanEmail = user.email.trim().slice(0, 160);
+      try {
+        const privRef = doc(db, 'users', user.uid, 'private', 'account');
+        await runTransaction(db, async (tx) => {
+          const privSnap = await tx.get(privRef);
+          if (!privSnap.exists()) {
+            tx.set(privRef, {
+              uid: user.uid,
+              email: cleanEmail,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+          } else {
+            tx.update(privRef, {
+              email: cleanEmail,
+              updatedAt: serverTimestamp(),
+            });
+          }
+        });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.WRITE, privatePath);
+      }
+    }
+  })().finally(() => {
+    pendingProfileSyncs.delete(user.uid);
+  });
+
+  pendingProfileSyncs.set(user.uid, syncPromise);
+  return syncPromise;
 }
 
 export async function signInWithGooglePopup(): Promise<User> {

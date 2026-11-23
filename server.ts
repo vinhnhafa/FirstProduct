@@ -5,14 +5,14 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
 import {
-  Card,
-  CardCombo,
+  type Card,
+  type CardCombo,
   canBeat,
   checkCaroWin,
   createShuffledDeck,
   evaluateCombo,
   sortCards,
-} from './shared/gameEngine';
+} from './shared/gameEngine.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
