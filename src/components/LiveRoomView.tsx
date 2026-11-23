@@ -32,6 +32,14 @@ import { LiveRoomDetail, LiveRoomSummary, Song, WeeklyGifterEntry } from '../typ
 import { extractYouTubeId, formatTime } from '../utils/vietnamese';
 import { WsListener } from '../hooks/useRealtimeSocket';
 import { HeartLeaderboardCard } from './HeartLeaderboardCard';
+import {
+  createVocalDspGraph,
+  loadSavedVocalDspSettings,
+  saveVocalDspSettings,
+  VocalDspGraphHandle,
+  VocalDspSettings,
+} from '../utils/vocalDsp';
+import { VocalDspPanel } from './VocalDspPanel';
 
 interface LiveRoomViewProps {
   userId: string;
@@ -42,6 +50,7 @@ interface LiveRoomViewProps {
   heartsBalance: number;
   rooms: LiveRoomSummary[];
   heartLeaderboard: WeeklyGifterEntry[];
+  monthlyHeartLeaderboard: WeeklyGifterEntry[];
   connected: boolean;
   sendEvent: (type: string, payload?: Record<string, unknown>) => void;
   subscribe: (listener: WsListener) => () => void;
@@ -77,6 +86,7 @@ export function LiveRoomView({
   heartsBalance,
   rooms,
   heartLeaderboard,
+  monthlyHeartLeaderboard,
   connected,
   sendEvent,
   subscribe,
@@ -120,8 +130,9 @@ export function LiveRoomView({
   const [isMicOn, setIsMicOn] = useState(false);
   const [isMusicMixed, setIsMusicMixed] = useState(false);
   const [micLevel, setMicLevel] = useState(0);
-  const [echoAmount, setEchoAmount] = useState(35); // 0..70%
-  const [micGainLevel, setMicGainLevel] = useState(110); // 50..160%
+  const [dspSettings, setDspSettings] = useState<VocalDspSettings>(() =>
+    loadSavedVocalDspSettings()
+  );
   const [musicMixLevel, setMusicMixLevel] = useState(85); // 0..120%
   const [loopbackOn, setLoopbackOn] = useState(false);
   const [listenerMicVolume, setListenerMicVolume] = useState(90);
@@ -134,10 +145,8 @@ export function LiveRoomView({
   const tabAudioStreamRef = useRef<MediaStream | null>(null);
   const processedStreamRef = useRef<MediaStream | null>(null);
   const audioDestinationRef = useRef<MediaStreamAudioDestinationNode | null>(null);
-  const micGainNodeRef = useRef<GainNode | null>(null);
+  const dspGraphRef = useRef<VocalDspGraphHandle | null>(null);
   const musicMixGainNodeRef = useRef<GainNode | null>(null);
-  const echoFeedbackNodeRef = useRef<GainNode | null>(null);
-  const echoWetNodeRef = useRef<GainNode | null>(null);
 
   const peersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -222,6 +231,10 @@ export function LiveRoomView({
       animFrameRef.current = null;
     }
     stopTabMusicCapture();
+    if (dspGraphRef.current) {
+      dspGraphRef.current.destroy();
+      dspGraphRef.current = null;
+    }
     if (audioCtxRef.current) {
       audioCtxRef.current.close().catch(() => {});
       audioCtxRef.current = null;
@@ -234,9 +247,6 @@ export function LiveRoomView({
     }
     processedStreamRef.current = null;
     audioDestinationRef.current = null;
-    micGainNodeRef.current = null;
-    echoFeedbackNodeRef.current = null;
-    echoWetNodeRef.current = null;
     if (loopbackAudioRef.current) {
       loopbackAudioRef.current.srcObject = null;
     }
@@ -245,28 +255,19 @@ export function LiveRoomView({
     setLoopbackOn(false);
   }, [stopTabMusicCapture]);
 
-  // Update live Echo, Mic Gain & Music Mix Gain nodes dynamically while singing
+  // Update live Vocal DSP (Echo, Delay, Reverb, Mic Gain, Tone EQ) & Music Mix nodes dynamically
   useEffect(() => {
-    if (micGainNodeRef.current) {
-      micGainNodeRef.current.gain.value = micGainLevel / 100;
+    saveVocalDspSettings(dspSettings);
+    if (dspGraphRef.current) {
+      dspGraphRef.current.updateSettings(dspSettings);
     }
-  }, [micGainLevel]);
+  }, [dspSettings]);
 
   useEffect(() => {
     if (musicMixGainNodeRef.current) {
       musicMixGainNodeRef.current.gain.value = musicMixLevel / 100;
     }
   }, [musicMixLevel]);
-
-  useEffect(() => {
-    const ratio = echoAmount / 100;
-    if (echoWetNodeRef.current) {
-      echoWetNodeRef.current.gain.value = ratio * 0.75;
-    }
-    if (echoFeedbackNodeRef.current) {
-      echoFeedbackNodeRef.current.gain.value = Math.min(0.48, ratio * 0.55);
-    }
-  }, [echoAmount]);
 
   const createOfferToPeer = useCallback(
     async (targetId: string) => {
@@ -816,57 +817,29 @@ export function LiveRoomView({
       });
       rawMicStreamRef.current = rawStream;
 
-      // Build Karaoke Vocal Processing Chain (Mic Gain + Warm Echo Delay) -> WebRTC Mixer Destination
+      // Build Karaoke Vocal DSP Processing Chain (Echo, Reverb, Tone EQ, Gain, Compressor) -> WebRTC Mixer Destination
       const AudioCtx =
         window.AudioContext ||
         (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-      const ctx = new AudioCtx();
+      const ctx = new AudioCtx({ latencyHint: 'interactive' });
+      if (ctx.state === 'suspended') {
+        await ctx.resume();
+      }
       audioCtxRef.current = ctx;
 
       const source = ctx.createMediaStreamSource(rawStream);
-      const micGain = ctx.createGain();
-      micGain.gain.value = micGainLevel / 100;
-      micGainNodeRef.current = micGain;
-
-      const delay = ctx.createDelay(1.0);
-      delay.delayTime.value = 0.18;
-
-      const feedback = ctx.createGain();
-      feedback.gain.value = Math.min(0.48, (echoAmount / 100) * 0.55);
-      echoFeedbackNodeRef.current = feedback;
-
-      const lowpass = ctx.createBiquadFilter();
-      lowpass.type = 'lowpass';
-      lowpass.frequency.value = 2400;
-
-      const wetGain = ctx.createGain();
-      wetGain.gain.value = (echoAmount / 100) * 0.75;
-      echoWetNodeRef.current = wetGain;
-
       const destination = ctx.createMediaStreamDestination();
       audioDestinationRef.current = destination;
 
-      source.connect(micGain);
-      // Dry vocal path
-      micGain.connect(destination);
-      // Echo wet vocal path
-      micGain.connect(delay);
-      delay.connect(lowpass);
-      lowpass.connect(feedback);
-      feedback.connect(delay);
-      lowpass.connect(wetGain);
-      wetGain.connect(destination);
+      const graph = createVocalDspGraph(ctx, source, dspSettings, destination);
+      dspGraphRef.current = graph;
 
       processedStreamRef.current = destination.stream;
 
       // Live VU meter
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 256;
-      micGain.connect(analyser);
-
-      const dataArr = new Uint8Array(analyser.frequencyBinCount);
+      const dataArr = new Uint8Array(graph.analyser.frequencyBinCount);
       const tick = () => {
-        analyser.getByteFrequencyData(dataArr);
+        graph.analyser.getByteFrequencyData(dataArr);
         let sum = 0;
         for (let i = 0; i < dataArr.length; i++) sum += dataArr[i];
         const avg = sum / dataArr.length;
@@ -1262,6 +1235,7 @@ export function LiveRoomView({
 
         <HeartLeaderboardCard
           entries={heartLeaderboard}
+          monthlyEntries={monthlyHeartLeaderboard}
           currentUserId={userId}
           currentUserName={userName}
           onOpenHeartStore={onOpenHeartStore}
@@ -1707,45 +1681,27 @@ export function LiveRoomView({
               )}
             </div>
 
-            {/* Karaoke Vocal Echo, Mic Gain & YouTube Beat Mix Sliders for Chosen Singer */}
+            {/* Karaoke Vocal DSP (Echo, Reverb, Tone EQ, Mic Gain) & YouTube Beat Mix Sliders for Chosen Singer */}
             {isSinger && isMicOn && (
-              <div className="pt-2 border-t border-slate-800/70 flex flex-wrap items-center gap-5 text-xs">
-                <div className="flex items-center gap-2">
-                  <span className="text-slate-400">Độ vang Echo:</span>
-                  <input
-                    type="range"
-                    min={0}
-                    max={70}
-                    value={echoAmount}
-                    onChange={(e) => setEchoAmount(Number(e.target.value))}
-                    className="karaoke-range w-24"
-                  />
-                  <span className="font-mono text-amber-300 tabular-nums">{echoAmount}%</span>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <span className="text-slate-400">Độ lớn giọng hát:</span>
-                  <input
-                    type="range"
-                    min={60}
-                    max={160}
-                    value={micGainLevel}
-                    onChange={(e) => setMicGainLevel(Number(e.target.value))}
-                    className="karaoke-range w-24"
-                  />
-                  <span className="font-mono text-emerald-300 tabular-nums">{micGainLevel}%</span>
-                </div>
+              <div className="pt-2 border-t border-slate-800/70 space-y-3">
+                <VocalDspPanel
+                  settings={dspSettings}
+                  onChange={setDspSettings}
+                  isMicActive={isMicOn}
+                  micLevel={micLevel}
+                  compact
+                />
 
                 {isMusicMixed && (
-                  <div className="flex items-center gap-2">
-                    <span className="text-purple-300">Nhạc YouTube truyền đi:</span>
+                  <div className="flex flex-wrap items-center gap-3 px-3 py-2 rounded-lg bg-purple-500/10 border border-purple-500/30 text-xs">
+                    <span className="text-purple-200 font-medium">Nhạc YouTube truyền đi:</span>
                     <input
                       type="range"
                       min={0}
                       max={120}
                       value={musicMixLevel}
                       onChange={(e) => setMusicMixLevel(Number(e.target.value))}
-                      className="karaoke-range w-24"
+                      className="karaoke-range w-32 sm:w-40"
                     />
                     <span className="font-mono text-purple-300 tabular-nums">{musicMixLevel}%</span>
                   </div>
@@ -1916,7 +1872,7 @@ export function LiveRoomView({
                   : 'border-transparent text-slate-400 hover:text-slate-200'
               }`}
             >
-              BXH Tặng Tim Tuần
+              BXH Tặng Tim
             </button>
           </div>
 
@@ -1924,6 +1880,7 @@ export function LiveRoomView({
             <div className="flex-1 overflow-y-auto custom-scrollbar p-3">
               <HeartLeaderboardCard
                 entries={heartLeaderboard}
+                monthlyEntries={monthlyHeartLeaderboard}
                 currentUserId={userId}
                 currentUserName={userName}
                 compact

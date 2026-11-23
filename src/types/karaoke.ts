@@ -1,4 +1,9 @@
-export type Genre = 'Tất cả' | 'Bolero' | 'Nhạc Trẻ' | 'Remix' | 'Nhạc Trữ Tình';
+export type Genre =
+  | 'Tất cả'
+  | 'Bolero'
+  | 'Nhạc Trẻ'
+  | 'Remix'
+  | 'Nhạc Trữ Tình';
 
 export type AppView = 'browse' | 'stage' | 'music' | 'rooms' | 'social';
 
@@ -52,7 +57,7 @@ export interface ToastMessage {
   type: 'info' | 'success' | 'warning';
 }
 
-export type ChatRoomId = 'nhac-tre' | 'bolero' | 'remix' | 'game-thu';
+export type ChatRoomId = string;
 
 export interface ChatUser {
   id: string;
@@ -61,9 +66,17 @@ export interface ChatUser {
   statusText: string;
 }
 
+export interface OnlineChatMember {
+  id: string;
+  nickname: string;
+  roomId: string;
+  roomName: string;
+}
+
 export interface ChatMessage {
   id: string;
   roomId: string;
+  senderId?: string;
   sender: string;
   text: string;
   timestamp: string;
@@ -72,6 +85,25 @@ export interface ChatMessage {
   isItalic?: boolean;
   isBuzz?: boolean;
   isSystem?: boolean;
+  sharedSong?: {
+    title: string;
+    artist: string;
+    youtubeId: string;
+  };
+}
+
+export interface PrivateChatMessage {
+  id: string;
+  fromUserId: string;
+  fromName: string;
+  toUserId: string;
+  toName: string;
+  text: string;
+  timestamp: string;
+  color: string;
+  isBold?: boolean;
+  isItalic?: boolean;
+  isBuzz?: boolean;
   sharedSong?: {
     title: string;
     artist: string;

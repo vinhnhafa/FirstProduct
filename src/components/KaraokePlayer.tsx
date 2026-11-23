@@ -11,6 +11,9 @@ import {
   Lock,
   Unlock,
   Music2,
+  Mic,
+  MicOff,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { Song } from '../types/karaoke';
 import { buildSongUrlPath, formatTime } from '../utils/vietnamese';
@@ -19,6 +22,14 @@ import {
   stopBackgroundAudioKeepAlive,
   syncMediaSession,
 } from '../utils/backgroundAudio';
+import {
+  createVocalDspGraph,
+  loadSavedVocalDspSettings,
+  saveVocalDspSettings,
+  VocalDspGraphHandle,
+  VocalDspSettings,
+} from '../utils/vocalDsp';
+import { VocalDspPanel } from './VocalDspPanel';
 
 declare global {
   interface Window {
@@ -142,6 +153,20 @@ export function KaraokePlayer({
   const [touchLock, setTouchLock] = useState(true);
   const [playerError, setPlayerError] = useState<string | null>(null);
 
+  // Live Microphone + Karaoke DSP (Echo, Reverb, Tone EQ, Mic Gain)
+  const [isMicOn, setIsMicOn] = useState(false);
+  const [showDspPanel, setShowDspPanel] = useState(false);
+  const [monitorMuted, setMonitorMuted] = useState(false);
+  const [micLevel, setMicLevel] = useState(0);
+  const [dspSettings, setDspSettings] = useState<VocalDspSettings>(() =>
+    loadSavedVocalDspSettings()
+  );
+
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const dspAudioCtxRef = useRef<AudioContext | null>(null);
+  const dspGraphRef = useRef<VocalDspGraphHandle | null>(null);
+  const dspAnimFrameRef = useRef<number | null>(null);
+
   const loadedVideoIdRef = useRef<string>(currentSong.youtubeId);
   const wantPlayingRef = useRef(false);
   const currentTimeRef = useRef(0);
@@ -151,6 +176,113 @@ export function KaraokePlayer({
   useEffect(() => {
     currentTimeRef.current = currentTime;
   }, [currentTime]);
+
+  const stopKaraokeMic = useCallback(() => {
+    if (dspAnimFrameRef.current !== null) {
+      cancelAnimationFrame(dspAnimFrameRef.current);
+      dspAnimFrameRef.current = null;
+    }
+    if (dspGraphRef.current) {
+      dspGraphRef.current.destroy();
+      dspGraphRef.current = null;
+    }
+    if (dspAudioCtxRef.current) {
+      dspAudioCtxRef.current.close().catch(() => {});
+      dspAudioCtxRef.current = null;
+    }
+    if (micStreamRef.current) {
+      for (const track of micStreamRef.current.getTracks()) {
+        track.stop();
+      }
+      micStreamRef.current = null;
+    }
+    setIsMicOn(false);
+    setMicLevel(0);
+  }, []);
+
+  useEffect(() => {
+    saveVocalDspSettings(dspSettings);
+    if (dspGraphRef.current) {
+      dspGraphRef.current.updateSettings(dspSettings);
+    }
+  }, [dspSettings]);
+
+  useEffect(() => {
+    if (dspGraphRef.current) {
+      dspGraphRef.current.setOutputMuted(monitorMuted);
+    }
+  }, [monitorMuted]);
+
+  useEffect(() => {
+    return () => {
+      stopKaraokeMic();
+    };
+  }, [stopKaraokeMic]);
+
+  const handleToggleKaraokeMic = useCallback(async () => {
+    if (isMicOn) {
+      stopKaraokeMic();
+      onToastRef.current('Đã tắt Micro Karaoke.', 'info');
+      return;
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      onToastRef.current(
+        'Trình duyệt hiện tại không hỗ trợ thu âm Micro Karaoke.',
+        'warning'
+      );
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: false,
+        },
+      });
+      micStreamRef.current = stream;
+
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const ctx = new AudioCtx({ latencyHint: 'interactive' });
+      if (ctx.state === 'suspended') {
+        await ctx.resume();
+      }
+      dspAudioCtxRef.current = ctx;
+
+      const source = ctx.createMediaStreamSource(stream);
+      const graph = createVocalDspGraph(ctx, source, dspSettings, ctx.destination);
+      graph.setOutputMuted(monitorMuted);
+      dspGraphRef.current = graph;
+
+      const dataArr = new Uint8Array(graph.analyser.frequencyBinCount);
+      const tick = () => {
+        graph.analyser.getByteFrequencyData(dataArr);
+        let sum = 0;
+        for (let i = 0; i < dataArr.length; i++) sum += dataArr[i];
+        const avg = sum / dataArr.length;
+        setMicLevel(Math.min(100, Math.round((avg / 105) * 100)));
+        dspAnimFrameRef.current = requestAnimationFrame(tick);
+      };
+      tick();
+
+      setIsMicOn(true);
+      setShowDspPanel(true);
+      onToastRef.current(
+        'Đã bật Mic Karaoke kèm DSP (Echo & Reverb)! Khuyên dùng tai nghe để tránh hú mic.',
+        'success'
+      );
+    } catch {
+      stopKaraokeMic();
+      onToastRef.current(
+        'Chưa cấp quyền Microphone hoặc không tìm thấy thiết bị Mic.',
+        'warning'
+      );
+    }
+  }, [isMicOn, dspSettings, monitorMuted, stopKaraokeMic]);
 
   // Initialize YouTube IFrame Player once (privacy-enhanced inline embed, no external app jump)
   useEffect(() => {
@@ -616,6 +748,40 @@ export function KaraokePlayer({
               <FileText className="w-4 h-4" />
               <span>{showLyrics ? 'Ẩn lời bài hát' : 'Hiện lời bài hát'}</span>
             </button>
+
+            <button
+              type="button"
+              onClick={handleToggleKaraokeMic}
+              aria-pressed={isMicOn}
+              className={`inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-lg text-sm font-semibold transition-colors whitespace-nowrap cursor-pointer border ${
+                isMicOn
+                  ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50'
+                  : 'bg-slate-800 text-slate-200 border-slate-700 hover:bg-slate-700'
+              }`}
+              title="Bật Mic hát trực tiếp kèm xử lý Echo & Reverb"
+            >
+              {isMicOn ? (
+                <Mic className="w-4 h-4 text-emerald-400 animate-pulse" />
+              ) : (
+                <MicOff className="w-4 h-4 text-slate-300" />
+              )}
+              <span>{isMicOn ? 'Tắt Mic' : 'Bật Mic Hát'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setShowDspPanel((v) => !v)}
+              aria-pressed={showDspPanel}
+              className={`inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-lg text-sm font-medium transition-colors whitespace-nowrap cursor-pointer border ${
+                showDspPanel
+                  ? 'bg-purple-500/20 text-purple-300 border-purple-500/45'
+                  : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
+              }`}
+              title="Mở bảng điều chỉnh Echo, Reverb và âm sắc giọng hát"
+            >
+              <SlidersHorizontal className="w-4 h-4" />
+              <span>DSP Echo/Reverb</span>
+            </button>
           </div>
 
           {/* Volume Control */}
@@ -638,7 +804,7 @@ export function KaraokePlayer({
               max={100}
               value={isMuted ? 0 : volume}
               onChange={(e) => handleVolumeChange(Number(e.target.value))}
-              aria-label="Âm lượng"
+              aria-label="Âm lượng nhạc nền"
               className="karaoke-range w-24 sm:w-28"
               style={{
                 background: `linear-gradient(to right, #F59E0B ${isMuted ? 0 : volume}%, #334155 ${isMuted ? 0 : volume}%)`,
@@ -651,6 +817,20 @@ export function KaraokePlayer({
             </span>
           </div>
         </div>
+
+        {/* Expandable Real-Time Vocal DSP Mixer (Echo, Echo Delay, Reverb, Mic Gain, Treble) */}
+        {showDspPanel && (
+          <VocalDspPanel
+            settings={dspSettings}
+            onChange={setDspSettings}
+            isMicActive={isMicOn}
+            micLevel={micLevel}
+            monitorMuted={monitorMuted}
+            onToggleMonitorMuted={() => setMonitorMuted((m) => !m)}
+            showMonitorToggle
+            compact
+          />
+        )}
       </div>
 
       {/* Synchronized Large Karaoke Lyrics Panel */}

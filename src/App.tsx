@@ -179,6 +179,7 @@ export default function App() {
   const [liveRooms, setLiveRooms] = useState<LiveRoomSummary[]>([]);
   const [gameRooms, setGameRooms] = useState<GameRoomSummary[]>([]);
   const [heartLeaderboard, setHeartLeaderboard] = useState<WeeklyGifterEntry[]>([]);
+  const [monthlyHeartLeaderboard, setMonthlyHeartLeaderboard] = useState<WeeklyGifterEntry[]>([]);
   const [isHeartStoreOpen, setIsHeartStoreOpen] = useState(false);
   const [roomCreateSong, setRoomCreateSong] = useState<Song | null>(null);
 
@@ -304,8 +305,10 @@ export default function App() {
 
     fetch('/api/leaderboard/hearts')
       .then((r) => r.json())
-      .then((d: { entries?: WeeklyGifterEntry[] }) => {
-        if (Array.isArray(d.entries)) setHeartLeaderboard(d.entries);
+      .then((d: { entries?: WeeklyGifterEntry[]; weeklyEntries?: WeeklyGifterEntry[]; monthlyEntries?: WeeklyGifterEntry[] }) => {
+        if (Array.isArray(d.weeklyEntries)) setHeartLeaderboard(d.weeklyEntries);
+        else if (Array.isArray(d.entries)) setHeartLeaderboard(d.entries);
+        if (Array.isArray(d.monthlyEntries)) setMonthlyHeartLeaderboard(d.monthlyEntries);
       })
       .catch(() => {});
 
@@ -348,8 +351,13 @@ export default function App() {
         setLiveRooms(payload.rooms as LiveRoomSummary[]);
       } else if (type === 'game:list' && Array.isArray(payload.rooms)) {
         setGameRooms(payload.rooms as GameRoomSummary[]);
-      } else if (type === 'leaderboard:hearts_updated' && Array.isArray(payload.entries)) {
-        setHeartLeaderboard(payload.entries as WeeklyGifterEntry[]);
+      } else if (type === 'leaderboard:hearts_updated') {
+        if (Array.isArray(payload.entries)) {
+          setHeartLeaderboard(payload.entries as WeeklyGifterEntry[]);
+        }
+        if (Array.isArray(payload.monthlyEntries)) {
+          setMonthlyHeartLeaderboard(payload.monthlyEntries as WeeklyGifterEntry[]);
+        }
       }
     });
   }, [subscribe]);
@@ -745,6 +753,7 @@ export default function App() {
             heartsBalance={heartsBalance}
             rooms={liveRooms}
             heartLeaderboard={heartLeaderboard}
+            monthlyHeartLeaderboard={monthlyHeartLeaderboard}
             connected={connected}
             sendEvent={sendEvent}
             subscribe={subscribe}
@@ -842,7 +851,12 @@ export default function App() {
           </section>
         )}
 
-        {!isTvMode && <SeoContentSection onNavigateView={setActiveView} />}
+        {!isTvMode && (
+          <SeoContentSection
+            onNavigateView={setActiveView}
+            onPlaySong={handlePlayNow}
+          />
+        )}
       </main>
 
       <footer className="border-t border-slate-800/70 py-5 px-4 sm:px-6 text-center text-xs text-slate-500">

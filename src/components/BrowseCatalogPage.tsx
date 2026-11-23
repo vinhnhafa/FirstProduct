@@ -26,7 +26,13 @@ interface BrowseCatalogPageProps {
   onOpenRoomWithSong: (song: Song) => void;
 }
 
-const GENRES: Genre[] = ['Tất cả', 'Bolero', 'Nhạc Trẻ', 'Remix', 'Nhạc Trữ Tình'];
+const GENRES: Genre[] = [
+  'Tất cả',
+  'Bolero',
+  'Nhạc Trẻ',
+  'Remix',
+  'Nhạc Trữ Tình',
+];
 const TONE_FILTERS = ['Tất cả Tone', 'Tone Nam', 'Tone Nữ', 'Song ca'] as const;
 type ToneFilter = (typeof TONE_FILTERS)[number];
 type SortBy = 'default' | 'az' | 'duration';

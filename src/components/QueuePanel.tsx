@@ -27,7 +27,13 @@ interface QueuePanelProps {
   onClearQueue: () => void;
 }
 
-const GENRES: Genre[] = ['Tất cả', 'Bolero', 'Nhạc Trẻ', 'Remix', 'Nhạc Trữ Tình'];
+const GENRES: Genre[] = [
+  'Tất cả',
+  'Bolero',
+  'Nhạc Trẻ',
+  'Remix',
+  'Nhạc Trữ Tình',
+];
 
 function SongArtwork({ youtubeId, title }: { youtubeId: string; title: string }) {
   const [failed, setFailed] = useState(false);

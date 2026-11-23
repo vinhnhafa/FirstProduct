@@ -1,8 +1,10 @@
-import { Crown, Heart, Trophy, ShoppingBag, Sparkles, Medal } from 'lucide-react';
+import { useState } from 'react';
+import { Crown, Heart, Trophy, ShoppingBag, Sparkles, Medal, Calendar } from 'lucide-react';
 import { WeeklyGifterEntry } from '../types/karaoke';
 
 interface HeartLeaderboardCardProps {
   entries: WeeklyGifterEntry[];
+  monthlyEntries?: WeeklyGifterEntry[];
   currentUserId: string;
   currentUserName: string;
   compact?: boolean;
@@ -11,17 +13,24 @@ interface HeartLeaderboardCardProps {
 
 export function HeartLeaderboardCard({
   entries,
+  monthlyEntries,
   currentUserId,
   currentUserName,
   compact = false,
   onOpenHeartStore,
 }: HeartLeaderboardCardProps) {
-  const topThree = entries.slice(0, 3);
-  const restEntries = entries.slice(3, compact ? 8 : 12);
+  const [period, setPeriod] = useState<'week' | 'month'>('week');
 
-  const myIndex = entries.findIndex((e) => e.userId === currentUserId);
-  const myEntry = myIndex !== -1 ? entries[myIndex] : null;
-  const nextAbove = myIndex > 0 ? entries[myIndex - 1] : entries[entries.length - 1] || null;
+  const activeEntries =
+    period === 'month' && monthlyEntries && monthlyEntries.length > 0 ? monthlyEntries : entries;
+
+  const topThree = activeEntries.slice(0, 3);
+  const restEntries = activeEntries.slice(3, compact ? 8 : 12);
+
+  const myIndex = activeEntries.findIndex((e) => e.userId === currentUserId);
+  const myEntry = myIndex !== -1 ? activeEntries[myIndex] : null;
+  const nextAbove =
+    myIndex > 0 ? activeEntries[myIndex - 1] : activeEntries[activeEntries.length - 1] || null;
   const heartsNeeded =
     myIndex === 0
       ? 0
@@ -30,6 +39,9 @@ export function HeartLeaderboardCard({
       : nextAbove
       ? nextAbove.heartsGiven + 1
       : 1;
+
+  const periodLabel = period === 'week' ? 'Tuần' : 'Tháng';
+  const periodPhrase = period === 'week' ? 'tuần này' : 'tháng này';
 
   return (
     <section className="rounded-2xl bg-[#111520] border border-amber-500/25 overflow-hidden shadow-xl">
@@ -41,22 +53,62 @@ export function HeartLeaderboardCard({
           </span>
           <div>
             <h2 className="font-display text-base sm:text-lg font-bold text-slate-50 flex items-center gap-2">
-              <span>Bảng Xếp Hạng Tặng Tim Tuần</span>
+              <span>Bảng Xếp Hạng Tặng Tim {periodLabel}</span>
             </h2>
             <p className="text-xs text-slate-400">
-              Vinh danh khán giả tặng nhiều tim nhất cho các ca sĩ trong phòng hát
+              {period === 'week'
+                ? 'Vinh danh khán giả tặng nhiều tim nhất tuần cho ca sĩ trong phòng hát'
+                : 'Vinh danh thành viên gắn bó tích lũy nhiều tim nhất tháng'}
             </p>
           </div>
         </div>
 
-        <button
-          type="button"
-          onClick={onOpenHeartStore}
-          className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-gradient-to-r from-rose-500 to-amber-500 hover:brightness-110 text-white font-bold text-xs transition-all cursor-pointer shadow-md whitespace-nowrap"
-        >
-          <ShoppingBag className="w-3.5 h-3.5" />
-          <span>Mua Tim Ủng Hộ Ca Sĩ</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Week / Month Toggle */}
+          <div
+            className="inline-flex items-center p-0.5 rounded-xl bg-slate-900/90 border border-slate-700/80"
+            role="tablist"
+            aria-label="Chọn kỳ xếp hạng"
+          >
+            <button
+              type="button"
+              role="tab"
+              aria-selected={period === 'week'}
+              onClick={() => setPeriod('week')}
+              className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
+                period === 'week'
+                  ? 'bg-amber-500 text-slate-950'
+                  : 'text-slate-300 hover:text-white'
+              }`}
+            >
+              <Calendar className="w-3.5 h-3.5" />
+              <span>Tuần</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={period === 'month'}
+              onClick={() => setPeriod('month')}
+              className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
+                period === 'month'
+                  ? 'bg-amber-500 text-slate-950'
+                  : 'text-slate-300 hover:text-white'
+              }`}
+            >
+              <Crown className="w-3.5 h-3.5" />
+              <span>Tháng</span>
+            </button>
+          </div>
+
+          <button
+            type="button"
+            onClick={onOpenHeartStore}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-gradient-to-r from-rose-500 to-amber-500 hover:brightness-110 text-white font-bold text-xs transition-all cursor-pointer shadow-md whitespace-nowrap"
+          >
+            <ShoppingBag className="w-3.5 h-3.5" />
+            <span>Mua Tim Ủng Hộ Ca Sĩ</span>
+          </button>
+        </div>
       </div>
 
       <div className="p-4 sm:p-5 space-y-4">
@@ -69,7 +121,7 @@ export function HeartLeaderboardCard({
                 {
                   border: 'border-amber-400/50 bg-gradient-to-b from-amber-500/15 to-slate-900/90',
                   rankText: 'text-amber-300',
-                  title: 'Top 1 · Vua Tặng Tim',
+                  title: period === 'month' ? 'Top 1 Tháng · Đại Gia Tim' : 'Top 1 · Vua Tặng Tim',
                   icon: Crown,
                 },
                 {
@@ -89,7 +141,7 @@ export function HeartLeaderboardCard({
 
               return (
                 <div
-                  key={entry.userId}
+                  key={`${period}-${entry.userId}`}
                   className={`rounded-xl border p-3.5 flex items-center justify-between gap-3 ${styleMap.border}`}
                 >
                   <div className="min-w-0 flex items-center gap-3">
@@ -134,7 +186,7 @@ export function HeartLeaderboardCard({
               const isMe = entry.userId === currentUserId;
               return (
                 <div
-                  key={entry.userId}
+                  key={`${period}-${entry.userId}`}
                   className={`px-3.5 py-2.5 flex items-center justify-between gap-3 ${
                     isMe ? 'bg-amber-500/10' : ''
                   }`}
@@ -171,7 +223,7 @@ export function HeartLeaderboardCard({
             {myEntry ? (
               <>
                 <p className="font-semibold text-slate-100">
-                  Hạng của bạn ({currentUserName}):{' '}
+                  Hạng {periodLabel.toLowerCase()} của bạn ({currentUserName}):{' '}
                   <span className="text-amber-300 font-mono">#{myIndex + 1}</span> · Đã tặng{' '}
                   <span className="text-rose-400 font-mono font-bold tabular-nums">
                     {myEntry.heartsGiven.toLocaleString('vi-VN')} Tim
@@ -190,10 +242,10 @@ export function HeartLeaderboardCard({
             ) : (
               <>
                 <p className="font-semibold text-slate-100">
-                  Bạn ({currentUserName}) chưa lên bảng xếp hạng tuần này
+                  Bạn ({currentUserName}) chưa lên bảng xếp hạng {periodPhrase}
                 </p>
                 <p className="text-slate-400">
-                  Vào phòng hát và tặng quà Tim (Hoa Hồng, Vương Miện, Pháo Hoa) để ghi danh ngay!
+                  Vào phòng hát và tặng quà Tim (Hoa Hồng, Vương Miện, Pháo Hoa) để ghi danh {periodPhrase}!
                 </p>
               </>
             )}

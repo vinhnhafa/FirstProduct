@@ -2,6 +2,7 @@ import express from 'express';
 import http from 'http';
 import crypto from 'crypto';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
 import {
@@ -13,6 +14,9 @@ import {
   evaluateCombo,
   sortCards,
 } from './shared/gameEngine.ts';
+import { getVietnamChatRoom } from './shared/vietnamChatRooms.ts';
+import { KARAOKE_SONGS } from './shared/karaokeSongs.ts';
+import { buildSongUrlPath, parseMediaUrlPath } from './shared/seoSlug.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -79,7 +83,27 @@ interface KaraokeRoom {
 interface YmMessage {
   id: string;
   roomId: string;
+  senderId?: string;
   sender: string;
+  text: string;
+  timestamp: string;
+  color: string;
+  isBold?: boolean;
+  isItalic?: boolean;
+  isBuzz?: boolean;
+  sharedSong?: {
+    title: string;
+    artist: string;
+    youtubeId: string;
+  };
+}
+
+interface YmPrivateMessage {
+  id: string;
+  fromUserId: string;
+  fromName: string;
+  toUserId: string;
+  toName: string;
   text: string;
   timestamp: string;
   color: string;
@@ -586,6 +610,103 @@ function getWeeklyLeaderboardEntries(): WeeklyGifterStat[] {
     .slice(0, 20);
 }
 
+const monthlyGiftLeaderboard = new Map<string, WeeklyGifterStat>([
+  [
+    'patron-1',
+    {
+      userId: 'patron-1',
+      userName: 'minh_quan_vip',
+      heartsGiven: 1680,
+      giftsCount: 52,
+      topSingerName: 'MC Tuấn Vũ',
+      topGiftLabel: 'Pháo Hoa Sân Khấu',
+      lastGiftAt: Date.now() - 1000 * 60 * 18,
+    },
+  ],
+  [
+    'patron-month-0',
+    {
+      userId: 'patron-month-0',
+      userName: 'thanh_phong_hcm',
+      heartsGiven: 1420,
+      giftsCount: 44,
+      topSingerName: 'Ca sĩ Ngọc Mai',
+      topGiftLabel: 'Pháo Hoa Sân Khấu',
+      lastGiftAt: Date.now() - 1000 * 60 * 60 * 26,
+    },
+  ],
+  [
+    'patron-2',
+    {
+      userId: 'patron-2',
+      userName: 'ngoc_lan_9x',
+      heartsGiven: 980,
+      giftsCount: 38,
+      topSingerName: 'DJ Thanh Hằng',
+      topGiftLabel: 'Vương Miện Ca Sĩ',
+      lastGiftAt: Date.now() - 1000 * 60 * 42,
+    },
+  ],
+  [
+    'patron-month-1',
+    {
+      userId: 'patron-month-1',
+      userName: 'anh_khoa_danang',
+      heartsGiven: 740,
+      giftsCount: 29,
+      topSingerName: 'MC Tuấn Vũ',
+      topGiftLabel: 'Vương Miện Ca Sĩ',
+      lastGiftAt: Date.now() - 1000 * 60 * 60 * 50,
+    },
+  ],
+  [
+    'patron-3',
+    {
+      userId: 'patron-3',
+      userName: 'hoang_tuan_sg',
+      heartsGiven: 590,
+      giftsCount: 24,
+      topSingerName: 'MC Tuấn Vũ',
+      topGiftLabel: 'Vương Miện Ca Sĩ',
+      lastGiftAt: Date.now() - 1000 * 60 * 75,
+    },
+  ],
+  [
+    'patron-4',
+    {
+      userId: 'patron-4',
+      userName: 'thao_vy_bolero',
+      heartsGiven: 340,
+      giftsCount: 19,
+      topSingerName: 'Ca sĩ Ngọc Mai',
+      topGiftLabel: 'Hoa Hồng Đỏ',
+      lastGiftAt: Date.now() - 1000 * 60 * 130,
+    },
+  ],
+  [
+    'patron-5',
+    {
+      userId: 'patron-5',
+      userName: 'hai_dang_kara',
+      heartsGiven: 215,
+      giftsCount: 15,
+      topSingerName: 'DJ Thanh Hằng',
+      topGiftLabel: 'Hoa Hồng Đỏ',
+      lastGiftAt: Date.now() - 1000 * 60 * 210,
+    },
+  ],
+]);
+
+function getMonthlyLeaderboardEntries(): WeeklyGifterStat[] {
+  return Array.from(monthlyGiftLeaderboard.values())
+    .sort((a, b) => {
+      if (b.heartsGiven !== a.heartsGiven) return b.heartsGiven - a.heartsGiven;
+      if (b.giftsCount !== a.giftsCount) return b.giftsCount - a.giftsCount;
+      return b.lastGiftAt - a.lastGiftAt;
+    })
+    .slice(0, 20);
+}
+
 function recordWeeklyHeartGift(
   userId: string,
   userName: string,
@@ -593,31 +714,37 @@ function recordWeeklyHeartGift(
   singerName: string,
   giftLabel: string
 ) {
-  const existing = weeklyGiftLeaderboard.get(userId);
-  if (existing) {
-    existing.userName = userName;
-    existing.heartsGiven += hearts;
-    existing.giftsCount += 1;
-    existing.topSingerName = singerName;
-    existing.topGiftLabel = giftLabel;
-    existing.lastGiftAt = Date.now();
-  } else {
-    weeklyGiftLeaderboard.set(userId, {
-      userId,
-      userName,
-      heartsGiven: hearts,
-      giftsCount: 1,
-      topSingerName: singerName,
-      topGiftLabel: giftLabel,
-      lastGiftAt: Date.now(),
-    });
-  }
+  const now = Date.now();
+  const upsert = (targetMap: Map<string, WeeklyGifterStat>) => {
+    const existing = targetMap.get(userId);
+    if (existing) {
+      existing.userName = userName;
+      existing.heartsGiven += hearts;
+      existing.giftsCount += 1;
+      existing.topSingerName = singerName;
+      existing.topGiftLabel = giftLabel;
+      existing.lastGiftAt = now;
+    } else {
+      targetMap.set(userId, {
+        userId,
+        userName,
+        heartsGiven: hearts,
+        giftsCount: 1,
+        topSingerName: singerName,
+        topGiftLabel: giftLabel,
+        lastGiftAt: now,
+      });
+    }
+  };
+  upsert(weeklyGiftLeaderboard);
+  upsert(monthlyGiftLeaderboard);
 }
 
 function broadcastWeeklyLeaderboard() {
   const entries = getWeeklyLeaderboardEntries();
+  const monthlyEntries = getMonthlyLeaderboardEntries();
   for (const client of clients.values()) {
-    sendJson(client.ws, 'leaderboard:hearts_updated', { entries });
+    sendJson(client.ws, 'leaderboard:hearts_updated', { entries, monthlyEntries });
   }
 }
 const ymHistory = new Map<string, YmMessage[]>([
@@ -674,6 +801,52 @@ const ymHistory = new Map<string, YmMessage[]>([
     ],
   ],
 ]);
+
+const ymPrivateHistory = new Map<string, YmPrivateMessage[]>();
+
+function getDmKey(userA: string, userB: string): string {
+  return [userA, userB].sort().join('::');
+}
+
+function ensureYmRoomHistory(roomId: string): YmMessage[] {
+  const existing = ymHistory.get(roomId);
+  if (existing) return existing;
+  const def = getVietnamChatRoom(roomId);
+  const initial: YmMessage[] = [
+    {
+      id: `ym-init-${roomId}`,
+      roomId,
+      sender: 'Quản Trị Phòng',
+      text: `Chào mừng đến ${def.name} (${def.group})! Bạn có thể chat chung hoặc bấm vào thành viên để chat riêng.`,
+      timestamp: nowTimeStr(),
+      color: '#FBBF24',
+    },
+  ];
+  ymHistory.set(roomId, initial);
+  return initial;
+}
+
+function getPrivateThreadsForUser(userId: string) {
+  const threads: Array<{ peerId: string; peerName: string; messages: YmPrivateMessage[] }> = [];
+  for (const [key, messages] of ymPrivateHistory.entries()) {
+    const [a, b] = key.split('::');
+    if (a !== userId && b !== userId) continue;
+    const peerId = a === userId ? b : a;
+    const lastWithPeer = [...messages].reverse().find(
+      (m) => m.fromUserId === peerId || m.toUserId === peerId
+    );
+    const livePeer = clients.get(peerId);
+    const peerName =
+      livePeer?.userName ||
+      (lastWithPeer
+        ? lastWithPeer.fromUserId === peerId
+          ? lastWithPeer.fromName
+          : lastWithPeer.toName
+        : 'Thành viên');
+    threads.push({ peerId, peerName, messages: messages.slice(-80) });
+  }
+  return threads;
+}
 
 function seedStarterRooms() {
   const starter1: KaraokeRoom = {
@@ -1121,6 +1294,33 @@ function getYmRoomUsers(roomId: string): Array<{ id: string; nickname: string }>
     }
   }
   return users;
+}
+
+function broadcastYmDirectory() {
+  const roomCounts: Record<string, number> = {};
+  const onlineUsers: Array<{ id: string; nickname: string; roomId: string; roomName: string }> = [];
+  for (const session of clients.values()) {
+    const rid = session.ymRoomId || 'nhac-tre';
+    roomCounts[rid] = (roomCounts[rid] || 0) + 1;
+    onlineUsers.push({
+      id: session.userId,
+      nickname: session.userName,
+      roomId: rid,
+      roomName: getVietnamChatRoom(rid).shortName,
+    });
+  }
+  for (const session of clients.values()) {
+    sendJson(session.ws, 'ym:directory', { onlineUsers, roomCounts });
+  }
+}
+
+function sendToUsers(userIds: string[], type: string, payload: unknown) {
+  const targetSet = new Set(userIds);
+  for (const session of clients.values()) {
+    if (targetSet.has(session.userId)) {
+      sendJson(session.ws, type, payload);
+    }
+  }
 }
 
 function leaveKaraokeRoom(session: ClientSession) {
@@ -1646,8 +1846,16 @@ async function bootstrap() {
     });
   });
 
-  app.get('/api/leaderboard/hearts', (_req, res) => {
-    res.json({ entries: getWeeklyLeaderboardEntries() });
+  app.get('/api/leaderboard/hearts', (req, res) => {
+    const period = req.query.period === 'month' ? 'month' : 'week';
+    const weeklyEntries = getWeeklyLeaderboardEntries();
+    const monthlyEntries = getMonthlyLeaderboardEntries();
+    res.json({
+      period,
+      entries: period === 'month' ? monthlyEntries : weeklyEntries,
+      weeklyEntries,
+      monthlyEntries,
+    });
   });
 
   // Multiplayer Game Rooms REST API
@@ -1877,6 +2085,14 @@ async function bootstrap() {
   app.get('/sitemap.xml', (req, res) => {
     const baseUrl = resolveAppBaseUrl(req);
     const today = new Date().toISOString().split('T')[0];
+    const escapeXml = (s: string) =>
+      s
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+
     const staticRoutes = [
       { loc: '/', priority: '1.0', changefreq: 'daily' },
       { loc: '/hat-karaoke-khong-quang-cao', priority: '0.95', changefreq: 'daily' },
@@ -1884,19 +2100,36 @@ async function bootstrap() {
       { loc: '/nghe-nhac-khong-quang-cao', priority: '0.9', changefreq: 'daily' },
       { loc: '/phong-hat-karaoke-truc-tuyen', priority: '0.85', changefreq: 'daily' },
       { loc: '/phong-chat-va-game', priority: '0.8', changefreq: 'weekly' },
-      { loc: '/karaoke-sau-tim-thiep-hong-song-ca-LPrOVzOHgZQ', priority: '0.8', changefreq: 'weekly' },
-      { loc: '/karaoke-duyen-phan-tone-nu-CZO9CbtOEmg', priority: '0.8', changefreq: 'weekly' },
-      { loc: '/karaoke-noi-nay-co-anh-beat-ha-tong-t4rjaYhmazo', priority: '0.8', changefreq: 'weekly' },
+    ];
+
+    const dynamicKaraokeRoutes = KARAOKE_SONGS.map((song) => ({
+      loc: buildSongUrlPath(song.title, song.youtubeId, 'karaoke'),
+      priority: '0.82',
+      changefreq: 'weekly',
+    }));
+
+    const featuredMp3Routes = [
       { loc: '/lk-ca-nhac-bolero-tru-tinh-hay-nhat-mp3-WaXpzNZw4jI', priority: '0.8', changefreq: 'weekly' },
       { loc: '/nhac-tre-ballad-hot-trend-mp3-S3bOgUn9Fg4', priority: '0.8', changefreq: 'weekly' },
+      { loc: '/nhac-bolero-tru-tinh-phoi-moi-ai-mp3-vF4UE-dOMdg', priority: '0.8', changefreq: 'weekly' },
+      { loc: '/em-say-roi-myra-tran-hat-live-mp3-Xzj4MCe53xM', priority: '0.8', changefreq: 'weekly' },
     ];
-    const urlEntries = staticRoutes
+
+    const seenLocs = new Set<string>();
+    const allRoutes = [...staticRoutes, ...dynamicKaraokeRoutes, ...featuredMp3Routes].filter((r) => {
+      if (seenLocs.has(r.loc)) return false;
+      seenLocs.add(r.loc);
+      return true;
+    });
+
+    const urlEntries = allRoutes
       .map(
         (u) =>
-          `  <url>\n    <loc>${baseUrl}${u.loc}</loc>\n    <lastmod>${today}</lastmod>\n    <changefreq>${u.changefreq}</changefreq>\n    <priority>${u.priority}</priority>\n  </url>`
+          `  <url>\n    <loc>${escapeXml(`${baseUrl}${u.loc}`)}</loc>\n    <lastmod>${today}</lastmod>\n    <changefreq>${u.changefreq}</changefreq>\n    <priority>${u.priority}</priority>\n  </url>`
       )
       .join('\n');
     res
+      .set('Cache-Control', 'public, max-age=3600')
       .type('application/xml; charset=utf-8')
       .send(
         `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urlEntries}\n</urlset>`
@@ -1946,10 +2179,15 @@ async function bootstrap() {
           });
           sendJson(ws, 'leaderboard:hearts_updated', {
             entries: getWeeklyLeaderboardEntries(),
+            monthlyEntries: getMonthlyLeaderboardEntries(),
           });
           sendJson(ws, 'game:list', {
             rooms: Array.from(gameRooms.values()).map(serializeGameRoomSummary),
           });
+          sendJson(ws, 'ym:dm_sync', {
+            threads: getPrivateThreadsForUser(uid),
+          });
+          broadcastYmDirectory();
           return;
         }
 
@@ -1960,9 +2198,11 @@ async function bootstrap() {
           const nextName = String(payload.userName || '').trim().slice(0, 28);
           if (nextName) {
             session.userName = nextName;
-            const lbEntry = weeklyGiftLeaderboard.get(session.userId);
-            if (lbEntry) {
-              lbEntry.userName = nextName;
+            const lbWeek = weeklyGiftLeaderboard.get(session.userId);
+            const lbMonth = monthlyGiftLeaderboard.get(session.userId);
+            if (lbWeek) lbWeek.userName = nextName;
+            if (lbMonth) lbMonth.userName = nextName;
+            if (lbWeek || lbMonth) {
               broadcastWeeklyLeaderboard();
             }
             if (session.karaokeRoomId) {
@@ -1981,6 +2221,7 @@ async function bootstrap() {
                 users: getYmRoomUsers(session.ymRoomId),
               });
             }
+            broadcastYmDirectory();
           }
           return;
         }
@@ -2302,7 +2543,7 @@ async function bootstrap() {
           return;
         }
 
-        // --- YAHOO! MESSENGER ROOMS ---
+        // --- YAHOO! MESSENGER ROOMS (CHAT CHUNG & TỈNH THÀNH VN) ---
         if (msg.type === 'ym:join') {
           const roomId = String(payload.roomId || 'nhac-tre');
           const prevRoom = session.ymRoomId;
@@ -2317,12 +2558,13 @@ async function bootstrap() {
 
           sendJson(ws, 'ym:history', {
             roomId,
-            messages: ymHistory.get(roomId) || [],
+            messages: ensureYmRoomHistory(roomId),
           });
           broadcastYmRoom(roomId, 'ym:presence', {
             roomId,
             users: getYmRoomUsers(roomId),
           });
+          broadcastYmDirectory();
           return;
         }
 
@@ -2335,10 +2577,11 @@ async function bootstrap() {
             ...message,
             id: message.id || `ym-${Date.now()}`,
             roomId,
+            senderId: session.userId,
             sender: session.userName,
             timestamp: nowTimeStr(),
           };
-          const list = ymHistory.get(roomId) || [];
+          const list = ensureYmRoomHistory(roomId);
           list.push(cleanMsg);
           if (list.length > 80) list.shift();
           ymHistory.set(roomId, list);
@@ -2352,6 +2595,7 @@ async function bootstrap() {
           const buzzMsg: YmMessage = {
             id: `buzz-${Date.now()}`,
             roomId,
+            senderId: session.userId,
             sender: session.userName,
             text: 'BUZZ!!!',
             timestamp: nowTimeStr(),
@@ -2359,12 +2603,83 @@ async function bootstrap() {
             isBold: true,
             isBuzz: true,
           };
-          const list = ymHistory.get(roomId) || [];
+          const list = ensureYmRoomHistory(roomId);
           list.push(buzzMsg);
           if (list.length > 80) list.shift();
           ymHistory.set(roomId, list);
 
           broadcastYmRoom(roomId, 'ym:buzz', { message: buzzMsg });
+          return;
+        }
+
+        // --- YAHOO! MESSENGER PRIVATE 1-1 CHAT (CHAT RIÊNG) ---
+        if (msg.type === 'ym:dm_history') {
+          const peerId = String(payload.peerId || '').trim();
+          if (!peerId) return;
+          const dmKey = getDmKey(session.userId, peerId);
+          sendJson(ws, 'ym:dm_thread', {
+            peerId,
+            messages: ymPrivateHistory.get(dmKey) || [],
+          });
+          return;
+        }
+
+        if (msg.type === 'ym:dm_send') {
+          const toUserId = String(payload.toUserId || '').trim();
+          if (!toUserId || toUserId === session.userId) return;
+          const rawMsg = payload.message as Partial<YmPrivateMessage> | undefined;
+          const text = String(rawMsg?.text || '').trim().slice(0, 600);
+          if (!text) return;
+
+          const targetClient = clients.get(toUserId);
+          const toName = targetClient?.userName || String(payload.toName || 'Thành viên').slice(0, 28);
+          const dmMsg: YmPrivateMessage = {
+            id: rawMsg?.id || `dm-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            fromUserId: session.userId,
+            fromName: session.userName,
+            toUserId,
+            toName,
+            text,
+            timestamp: nowTimeStr(),
+            color: String(rawMsg?.color || '#F8FAFC'),
+            isBold: Boolean(rawMsg?.isBold),
+            isItalic: Boolean(rawMsg?.isItalic),
+            sharedSong: rawMsg?.sharedSong,
+          };
+          const dmKey = getDmKey(session.userId, toUserId);
+          const list = ymPrivateHistory.get(dmKey) || [];
+          list.push(dmMsg);
+          if (list.length > 100) list.shift();
+          ymPrivateHistory.set(dmKey, list);
+
+          sendToUsers([session.userId, toUserId], 'ym:dm_message', { message: dmMsg });
+          return;
+        }
+
+        if (msg.type === 'ym:dm_buzz') {
+          const toUserId = String(payload.toUserId || '').trim();
+          if (!toUserId || toUserId === session.userId) return;
+          const targetClient = clients.get(toUserId);
+          const toName = targetClient?.userName || String(payload.toName || 'Thành viên').slice(0, 28);
+          const buzzMsg: YmPrivateMessage = {
+            id: `dm-buzz-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+            fromUserId: session.userId,
+            fromName: session.userName,
+            toUserId,
+            toName,
+            text: 'BUZZ!!!',
+            timestamp: nowTimeStr(),
+            color: '#EF4444',
+            isBold: true,
+            isBuzz: true,
+          };
+          const dmKey = getDmKey(session.userId, toUserId);
+          const list = ymPrivateHistory.get(dmKey) || [];
+          list.push(buzzMsg);
+          if (list.length > 100) list.shift();
+          ymPrivateHistory.set(dmKey, list);
+
+          sendToUsers([session.userId, toUserId], 'ym:dm_buzz', { message: buzzMsg });
           return;
         }
 
@@ -2612,6 +2927,7 @@ async function bootstrap() {
           users: getYmRoomUsers(prevYm),
         });
       }
+      broadcastYmDirectory();
     });
   });
 
@@ -2624,9 +2940,92 @@ async function bootstrap() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.resolve(__dirname, 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+    const indexHtmlPath = path.join(distPath, 'index.html');
+    const escapeHtmlAttr = (s: string) =>
+      s
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+
+    app.use(express.static(distPath, { index: false }));
+    app.get('*', (req, res) => {
+      try {
+        let html = fs.readFileSync(indexHtmlPath, 'utf8');
+        const baseUrl = resolveAppBaseUrl(req);
+        const reqPath = req.path || '/';
+        let seoTitle = 'Hát Karaoke Không Quảng Cáo & Nghe Nhạc YouTube MP3 | Karaoke Online';
+        let seoDesc =
+          'Hát karaoke không quảng cáo pop-up trên điện thoại & TV, nghe nhạc YouTube MP3 và nghe nhạc không quảng cáo mọi thể loại ngay trong trình duyệt.';
+        let canonicalPath = reqPath === '/' ? '/' : reqPath;
+
+        if (reqPath === '/hat-karaoke-khong-quang-cao') {
+          seoTitle = 'Kho Nhạc Hát Karaoke Không Quảng Cáo | Karaoke Online';
+          seoDesc =
+            'Kho bài hát karaoke không quảng cáo pop-up: lọc sẵn Bolero, Nhạc Trẻ, Remix, Nhạc Trữ Tình beat chuẩn YouTube ngay trên trình duyệt.';
+        } else if (reqPath === '/nghe-nhac-youtube-mp3' || reqPath === '/nghe-nhac-khong-quang-cao') {
+          seoTitle = 'Nghe Nhạc YouTube MP3 & Nghe Nhạc Không Quảng Cáo | Karaoke Online';
+          seoDesc =
+            'Nghe nhạc YouTube MP3 và nghe nhạc không quảng cáo pop-up mọi thể loại: Bolero, Nhạc Trẻ, Nhạc Trữ Tình, Nhạc Sống, hỗ trợ lưu lịch sử & tắt màn hình.';
+        } else if (reqPath === '/phong-hat-karaoke-truc-tuyen') {
+          seoTitle = 'Phòng Hát Karaoke Trực Tuyến Mic Live | Karaoke Online';
+          seoDesc =
+            'Vào phòng hát karaoke trực tuyến miễn phí, bật mic echo trộn nhạc nền YouTube, tặng tim cổ vũ ca sĩ và hát karaoke không quảng cáo cùng bạn bè.';
+        } else if (reqPath === '/phong-chat-va-game') {
+          seoTitle = 'Phòng Chat Yahoo 63 Tỉnh Thành & Sảnh Game | Karaoke Online';
+          seoDesc =
+            'Chat chung 63 tỉnh thành Việt Nam, chat riêng 1-1, chơi Tiến Lên & Cờ Caro kết hợp hát karaoke và nghe nhạc YouTube MP3 không quảng cáo.';
+        } else {
+          const media = parseMediaUrlPath(reqPath);
+          if (media) {
+            const matchedSong = KARAOKE_SONGS.find((s) => s.youtubeId === media.youtubeId);
+            const cleanTitle = matchedSong?.title || media.rawSlug.replace(/-/g, ' ');
+            if (media.kind === 'mp3') {
+              seoTitle = `${cleanTitle} MP3 — Nghe Nhạc YouTube MP3 | Karaoke Online`;
+              seoDesc = `Nghe nhạc YouTube MP3 bài ${cleanTitle}. Nghe nhạc không quảng cáo pop-up ngay trong trình duyệt điện thoại, hỗ trợ tắt màn hình.`;
+            } else {
+              seoTitle = `${cleanTitle} — Hát Karaoke Không Quảng Cáo | Karaoke Online`;
+              seoDesc = `Hát karaoke không quảng cáo bài ${cleanTitle}${matchedSong ? ` (${matchedSong.artist})` : ''}. Beat chuẩn chữ chạy mượt trên trình duyệt điện thoại và TV.`;
+            }
+          }
+        }
+
+        const fullUrl = `${baseUrl}${canonicalPath}`;
+        html = html
+          .replace(/<title>[\s\S]*?<\/title>/, `<title>${escapeHtmlAttr(seoTitle)}</title>`)
+          .replace(
+            /<meta\s+name="description"\s+content="[^"]*"\s*\/?>/,
+            `<meta name="description" content="${escapeHtmlAttr(seoDesc)}" />`
+          )
+          .replace(
+            /<meta\s+property="og:title"\s+content="[^"]*"\s*\/?>/,
+            `<meta property="og:title" content="${escapeHtmlAttr(seoTitle)}" />`
+          )
+          .replace(
+            /<meta\s+property="og:description"\s+content="[^"]*"\s*\/?>/,
+            `<meta property="og:description" content="${escapeHtmlAttr(seoDesc)}" />`
+          )
+          .replace(
+            /<meta\s+property="og:url"\s+content="[^"]*"\s*\/?>/,
+            `<meta property="og:url" content="${escapeHtmlAttr(fullUrl)}" />`
+          )
+          .replace(
+            /<meta\s+name="twitter:title"\s+content="[^"]*"\s*\/?>/,
+            `<meta name="twitter:title" content="${escapeHtmlAttr(seoTitle)}" />`
+          )
+          .replace(
+            /<meta\s+name="twitter:description"\s+content="[^"]*"\s*\/?>/,
+            `<meta name="twitter:description" content="${escapeHtmlAttr(seoDesc)}" />`
+          )
+          .replace(
+            '</head>',
+            `  <link rel="canonical" href="${escapeHtmlAttr(fullUrl)}" />\n  </head>`
+          );
+
+        res.type('text/html; charset=utf-8').send(html);
+      } catch {
+        res.sendFile(indexHtmlPath);
+      }
     });
   }
 
