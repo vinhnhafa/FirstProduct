@@ -160,7 +160,7 @@ export function SeoContentSection({ onNavigateView, onPlaySong }: SeoContentSect
           <article className="rounded-xl bg-slate-900/75 border border-slate-800 p-4 sm:p-5 space-y-2.5">
             <div className="flex items-center gap-2 text-sky-400 text-xs font-semibold">
               <Radio className="w-4 h-4 shrink-0" />
-              <span>Bài viết 4 · Phòng Hát Live, Chat 63 Tỉnh Thành &amp; Đua Top Tim</span>
+              <span>Bài viết 4 · Phòng Hát Live, Chat 34 Tỉnh Thành Mới &amp; Đua Top Tim</span>
             </div>
             <h3 className="font-display text-base sm:text-lg font-bold text-slate-100">
               Phòng Hát Karaoke Trực Tuyến Mic Live &amp; Cộng Đồng Hát Karaoke Toàn Quốc
@@ -174,7 +174,7 @@ export function SeoContentSection({ onNavigateView, onPlaySong }: SeoContentSect
                 onClick={(e) => handleRouteClick(e, 'social')}
                 className="text-sky-300 underline decoration-sky-400/50 hover:text-sky-200 font-semibold"
               >
-                Phòng Chat Yahoo 63 Tỉnh Thành Việt Nam
+                Phòng Chat 34 Tỉnh Thành Mới Việt Nam
               </a>{' '}
               để chat chung, chat riêng 1-1 và chơi Tiến Lên, Cờ Caro cùng bạn bè.
             </p>

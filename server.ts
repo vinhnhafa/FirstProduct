@@ -14,9 +14,18 @@ import {
   evaluateCombo,
   sortCards,
 } from './shared/gameEngine.ts';
-import { getVietnamChatRoom } from './shared/vietnamChatRooms.ts';
+import {
+  getVietnamChatRoom,
+  resolveVietnamChatRoomId,
+  VIETNAM_CHAT_ROOM_MAP,
+} from './shared/vietnamChatRooms.ts';
 import { KARAOKE_SONGS } from './shared/karaokeSongs.ts';
-import { buildSongUrlPath, parseMediaUrlPath } from './shared/seoSlug.ts';
+import { STARTER_MUSIC_TRACKS } from './shared/musicTracks.ts';
+import {
+  buildSongUrlPath,
+  parseCommunityRoomPath,
+  parseMediaUrlPath,
+} from './shared/seoSlug.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -115,6 +124,28 @@ interface YmPrivateMessage {
     artist: string;
     youtubeId: string;
   };
+}
+
+interface YmRoomTrack {
+  trackId: string;
+  youtubeId: string;
+  title: string;
+  artist: string;
+  durationSeconds: number;
+  addedByUserId: string;
+  addedByName: string;
+  addedAt: number;
+}
+
+interface YmRoomMusicState {
+  roomId: string;
+  hostUserId: string | null;
+  hostName: string | null;
+  currentTrack: YmRoomTrack | null;
+  playlist: YmRoomTrack[];
+  isPlaying: boolean;
+  positionSeconds: number;
+  syncedAt: number;
 }
 
 interface ClientSession {
@@ -372,7 +403,8 @@ async function searchYouTubeWithoutApiKey(
   rawQuery: string,
   genre: string,
   karaokeOnly: boolean,
-  sort: 'all' | 'hot' | 'new' = 'all'
+  sort: 'all' | 'hot' | 'new' = 'all',
+  musicOnly = false
 ): Promise<RoomSong[]> {
   const karaokeGenreQueries: Record<string, string> = {
     'Tất cả': 'karaoke nhạc việt beat chuẩn',
@@ -423,7 +455,7 @@ async function searchYouTubeWithoutApiKey(
     }
   }
 
-  const cacheKey = `${query.toLowerCase()}|${genre}|${karaokeOnly}|${sort}`;
+  const cacheKey = `${query.toLowerCase()}|${genre}|${karaokeOnly}|${musicOnly}|${sort}`;
   const cached = ytSearchCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
     return cached.items.filter((item) => !blockedVideoIds.has(item.youtubeId));
@@ -482,6 +514,22 @@ async function searchYouTubeWithoutApiKey(
     const karaokeFlag = isKaraokeTrack(title, channel);
     // Strict Karaoke-only enforcement (never let non-karaoke songs leak when karaokeOnly=true)
     if (karaokeOnly && !karaokeFlag) continue;
+
+    // When room/music mode asks strictly for regular songs, exclude explicit karaoke/beat videos unless searched intentionally
+    const rawLower = rawQuery.trim().toLowerCase();
+    const titleLower = title.toLowerCase();
+    if (
+      musicOnly &&
+      !karaokeOnly &&
+      !rawLower.includes('karaoke') &&
+      (titleLower.includes('karaoke') ||
+        titleLower.includes('karafun') ||
+        titleLower.includes('beat chuẩn') ||
+        titleLower.includes('không lời') ||
+        titleLower.includes('instrumental'))
+    ) {
+      continue;
+    }
 
     const viewObj = v.shortViewCountText as { simpleText?: string } | undefined;
     const viewCountText = viewObj?.simpleText || '';
@@ -817,13 +865,68 @@ function ensureYmRoomHistory(roomId: string): YmMessage[] {
       id: `ym-init-${roomId}`,
       roomId,
       sender: 'Quản Trị Phòng',
-      text: `Chào mừng đến ${def.name} (${def.group})! Bạn có thể chat chung hoặc bấm vào thành viên để chat riêng.`,
+      text: `Chào mừng đến ${def.name} (${def.group})! Chủ phòng điều khiển nhạc nền, còn mọi thành viên đều có thể thêm bài hát hợp gu phòng.`,
       timestamp: nowTimeStr(),
       color: '#FBBF24',
     },
   ];
   ymHistory.set(roomId, initial);
   return initial;
+}
+
+const ymRoomStates = new Map<string, YmRoomMusicState>();
+
+function buildInitialTracksForYmRoom(roomId: string): YmRoomTrack[] {
+  const def = getVietnamChatRoom(roomId);
+  const g = def.suggestedGenre.toLowerCase();
+
+  let matched = STARTER_MUSIC_TRACKS.filter((track) => {
+    const tg = track.genre.toLowerCase();
+    if (tg === g) return true;
+    if (g.includes('bolero') && (tg.includes('bolero') || tg.includes('nhạc vàng'))) return true;
+    if (g.includes('vàng') && (tg.includes('nhạc vàng') || tg.includes('bolero'))) return true;
+    if (g.includes('sến') && (tg.includes('nhạc sến') || tg.includes('bolero'))) return true;
+    if (g.includes('trữ tình') && (tg.includes('trữ tình') || tg.includes('bolero'))) return true;
+    if (g.includes('remix') && tg.includes('remix')) return true;
+    if (g.includes('lofi') && (tg.includes('lofi') || tg.includes('acoustic'))) return true;
+    if (g.includes('acoustic') && (tg.includes('acoustic') || tg.includes('lofi'))) return true;
+    return false;
+  });
+
+  if (matched.length < 3) {
+    const seen = new Set(matched.map((t) => t.youtubeId));
+    const extras = STARTER_MUSIC_TRACKS.filter((t) => !seen.has(t.youtubeId));
+    matched = [...matched, ...extras];
+  }
+
+  return matched.slice(0, 3).map((song, idx) => ({
+    trackId: `seed-${roomId}-${idx}-${song.youtubeId}`,
+    youtubeId: song.youtubeId,
+    title: song.title,
+    artist: song.artist,
+    durationSeconds: song.durationSeconds,
+    addedByUserId: 'system-seed',
+    addedByName: 'Gợi ý theo phòng',
+    addedAt: Date.now() + idx,
+  }));
+}
+
+function ensureYmRoomMusicState(roomId: string): YmRoomMusicState {
+  const existing = ymRoomStates.get(roomId);
+  if (existing) return existing;
+  const seeded = buildInitialTracksForYmRoom(roomId);
+  const state: YmRoomMusicState = {
+    roomId,
+    hostUserId: null,
+    hostName: null,
+    currentTrack: seeded[0] ?? null,
+    playlist: seeded,
+    isPlaying: false,
+    positionSeconds: 0,
+    syncedAt: Date.now(),
+  };
+  ymRoomStates.set(roomId, state);
+  return state;
 }
 
 function getPrivateThreadsForUser(userId: string) {
@@ -1296,21 +1399,87 @@ function getYmRoomUsers(roomId: string): Array<{ id: string; nickname: string }>
   return users;
 }
 
+function broadcastYmRoomMusic(roomId: string) {
+  const state = ensureYmRoomMusicState(roomId);
+  broadcastYmRoom(roomId, 'ym:music_state', { state });
+}
+
+function leaveYmRoom(session: ClientSession) {
+  const prevRoom = session.ymRoomId;
+  if (!prevRoom) return;
+  session.ymRoomId = null;
+
+  const remainingUsers = getYmRoomUsers(prevRoom);
+  const state = ymRoomStates.get(prevRoom);
+  if (state && state.hostUserId === session.userId) {
+    if (remainingUsers.length > 0) {
+      state.hostUserId = remainingUsers[0].id;
+      state.hostName = remainingUsers[0].nickname;
+    } else {
+      state.hostUserId = null;
+      state.hostName = null;
+      state.isPlaying = false;
+    }
+    broadcastYmRoomMusic(prevRoom);
+  }
+
+  broadcastYmRoom(prevRoom, 'ym:presence', {
+    roomId: prevRoom,
+    users: remainingUsers,
+  });
+}
+
 function broadcastYmDirectory() {
   const roomCounts: Record<string, number> = {};
   const onlineUsers: Array<{ id: string; nickname: string; roomId: string; roomName: string }> = [];
   for (const session of clients.values()) {
-    const rid = session.ymRoomId || 'nhac-tre';
-    roomCounts[rid] = (roomCounts[rid] || 0) + 1;
+    const rid = session.ymRoomId;
+    if (rid) {
+      roomCounts[rid] = (roomCounts[rid] || 0) + 1;
+    }
     onlineUsers.push({
       id: session.userId,
       nickname: session.userName,
-      roomId: rid,
-      roomName: getVietnamChatRoom(rid).shortName,
+      roomId: rid || '',
+      roomName: rid ? getVietnamChatRoom(rid).shortName : 'Sảnh chờ',
     });
   }
+
+  const roomSummaries: Record<
+    string,
+    {
+      count: number;
+      hostName: string | null;
+      currentTrackTitle: string | null;
+      isPlaying: boolean;
+      playlistCount: number;
+    }
+  > = {};
+
+  for (const [rid, count] of Object.entries(roomCounts)) {
+    const st = ymRoomStates.get(rid);
+    roomSummaries[rid] = {
+      count,
+      hostName: st?.hostName || null,
+      currentTrackTitle: st?.currentTrack?.title || null,
+      isPlaying: Boolean(st?.isPlaying),
+      playlistCount: st?.playlist.length || 0,
+    };
+  }
+  for (const [rid, st] of ymRoomStates.entries()) {
+    if (!roomSummaries[rid]) {
+      roomSummaries[rid] = {
+        count: 0,
+        hostName: st.hostName,
+        currentTrackTitle: st.currentTrack?.title || null,
+        isPlaying: st.isPlaying,
+        playlistCount: st.playlist.length,
+      };
+    }
+  }
+
   for (const session of clients.values()) {
-    sendJson(session.ws, 'ym:directory', { onlineUsers, roomCounts });
+    sendJson(session.ws, 'ym:directory', { onlineUsers, roomCounts, roomSummaries });
   }
 }
 
@@ -1388,12 +1557,13 @@ async function bootstrap() {
     const q = String(req.query.q || '');
     const genre = String(req.query.genre || 'Tất cả');
     const karaokeOnly = req.query.karaokeOnly !== 'false';
+    const musicOnly = req.query.musicOnly === 'true';
     const rawSort = String(req.query.sort || 'all');
     const sort: 'all' | 'hot' | 'new' =
       rawSort === 'hot' || rawSort === 'new' ? rawSort : 'all';
 
     try {
-      const items = await searchYouTubeWithoutApiKey(q, genre, karaokeOnly, sort);
+      const items = await searchYouTubeWithoutApiKey(q, genre, karaokeOnly, sort, musicOnly);
       res.json({ items, source: 'youtube-live' });
     } catch {
       res.status(502).json({ items: [], error: 'Không thể tải kết quả từ YouTube lúc này.' });
@@ -2216,6 +2386,11 @@ async function bootstrap() {
               }
             }
             if (session.ymRoomId) {
+              const ymState = ymRoomStates.get(session.ymRoomId);
+              if (ymState && ymState.hostUserId === session.userId) {
+                ymState.hostName = nextName;
+                broadcastYmRoomMusic(session.ymRoomId);
+              }
               broadcastYmRoom(session.ymRoomId, 'ym:presence', {
                 roomId: session.ymRoomId,
                 users: getYmRoomUsers(session.ymRoomId),
@@ -2543,27 +2718,220 @@ async function bootstrap() {
           return;
         }
 
-        // --- YAHOO! MESSENGER ROOMS (CHAT CHUNG & TỈNH THÀNH VN) ---
+        // --- YAHOO! MESSENGER ROOMS (CHAT CHUNG, PHÒNG THỂ LOẠI NHẠC & 63 TỈNH THÀNH VN) ---
         if (msg.type === 'ym:join') {
-          const roomId = String(payload.roomId || 'nhac-tre');
-          const prevRoom = session.ymRoomId;
+          const requestedRoomId = String(payload.roomId || 'nhac-tre');
+          const roomId = resolveVietnamChatRoomId(requestedRoomId);
+          if (session.ymRoomId && session.ymRoomId !== roomId) {
+            leaveYmRoom(session);
+          }
           session.ymRoomId = roomId;
 
-          if (prevRoom && prevRoom !== roomId) {
-            broadcastYmRoom(prevRoom, 'ym:presence', {
-              roomId: prevRoom,
-              users: getYmRoomUsers(prevRoom),
-            });
+          const roomUsers = getYmRoomUsers(roomId);
+          const musicState = ensureYmRoomMusicState(roomId);
+          const hostStillPresent =
+            musicState.hostUserId && roomUsers.some((u) => u.id === musicState.hostUserId);
+          if (!hostStillPresent) {
+            musicState.hostUserId = session.userId;
+            musicState.hostName = session.userName;
           }
 
           sendJson(ws, 'ym:history', {
             roomId,
             messages: ensureYmRoomHistory(roomId),
           });
+          sendJson(ws, 'ym:music_state', {
+            state: musicState,
+          });
           broadcastYmRoom(roomId, 'ym:presence', {
             roomId,
-            users: getYmRoomUsers(roomId),
+            users: roomUsers,
           });
+          broadcastYmRoomMusic(roomId);
+          broadcastYmDirectory();
+          return;
+        }
+
+        if (msg.type === 'ym:leave_room') {
+          leaveYmRoom(session);
+          broadcastYmDirectory();
+          return;
+        }
+
+        if (msg.type === 'ym:claim_host') {
+          const roomId = String(payload.roomId || session.ymRoomId || '');
+          if (!roomId || session.ymRoomId !== roomId) return;
+          const musicState = ensureYmRoomMusicState(roomId);
+          const roomUsers = getYmRoomUsers(roomId);
+          const hostPresent =
+            musicState.hostUserId && roomUsers.some((u) => u.id === musicState.hostUserId);
+          if (!hostPresent) {
+            musicState.hostUserId = session.userId;
+            musicState.hostName = session.userName;
+            broadcastYmRoomMusic(roomId);
+            broadcastYmDirectory();
+          }
+          return;
+        }
+
+        if (msg.type === 'ym:transfer_host') {
+          const roomId = String(payload.roomId || session.ymRoomId || '');
+          const targetUserId = String(payload.targetUserId || '');
+          if (!roomId || !targetUserId || session.ymRoomId !== roomId) return;
+          const musicState = ensureYmRoomMusicState(roomId);
+          if (musicState.hostUserId !== session.userId) return;
+          const targetUser = getYmRoomUsers(roomId).find((u) => u.id === targetUserId);
+          if (!targetUser) return;
+          musicState.hostUserId = targetUser.id;
+          musicState.hostName = targetUser.nickname;
+          broadcastYmRoomMusic(roomId);
+          broadcastYmDirectory();
+          return;
+        }
+
+        if (msg.type === 'ym:music_control') {
+          const roomId = String(payload.roomId || session.ymRoomId || '');
+          if (!roomId || session.ymRoomId !== roomId) return;
+          const musicState = ensureYmRoomMusicState(roomId);
+          if (musicState.hostUserId !== session.userId) {
+            sendJson(ws, 'toast', {
+              message: 'Chỉ Chủ phòng mới có quyền bật, tắt hoặc chuyển nhạc phòng.',
+              type: 'warning',
+            });
+            return;
+          }
+
+          const action = String(payload.action || '');
+          if (action === 'play') {
+            if (!musicState.currentTrack && musicState.playlist.length > 0) {
+              musicState.currentTrack = musicState.playlist[0];
+            }
+            if (typeof payload.positionSeconds === 'number' && Number.isFinite(payload.positionSeconds)) {
+              musicState.positionSeconds = Math.max(0, payload.positionSeconds);
+            }
+            musicState.isPlaying = Boolean(musicState.currentTrack);
+            musicState.syncedAt = Date.now();
+          } else if (action === 'pause') {
+            if (typeof payload.positionSeconds === 'number' && Number.isFinite(payload.positionSeconds)) {
+              musicState.positionSeconds = Math.max(0, payload.positionSeconds);
+            }
+            musicState.isPlaying = false;
+            musicState.syncedAt = Date.now();
+          } else if (action === 'seek') {
+            const pos = Number(payload.positionSeconds ?? 0);
+            if (Number.isFinite(pos)) {
+              musicState.positionSeconds = Math.max(0, pos);
+              musicState.syncedAt = Date.now();
+            }
+          } else if (action === 'select_track') {
+            const trackId = String(payload.trackId || '');
+            const found = musicState.playlist.find((t) => t.trackId === trackId);
+            if (found) {
+              musicState.currentTrack = found;
+              musicState.positionSeconds = 0;
+              musicState.isPlaying = true;
+              musicState.syncedAt = Date.now();
+            }
+          } else if (action === 'next') {
+            if (musicState.playlist.length > 0) {
+              const curIdx = musicState.currentTrack
+                ? musicState.playlist.findIndex((t) => t.trackId === musicState.currentTrack?.trackId)
+                : -1;
+              const nextIdx = curIdx >= 0 ? (curIdx + 1) % musicState.playlist.length : 0;
+              musicState.currentTrack = musicState.playlist[nextIdx];
+              musicState.positionSeconds = 0;
+              musicState.isPlaying = true;
+              musicState.syncedAt = Date.now();
+            }
+          }
+
+          broadcastYmRoomMusic(roomId);
+          broadcastYmDirectory();
+          return;
+        }
+
+        if (msg.type === 'ym:playlist_add') {
+          const roomId = String(payload.roomId || session.ymRoomId || '');
+          if (!roomId || session.ymRoomId !== roomId) return;
+          const rawSong = payload.song as
+            | { youtubeId?: string; title?: string; artist?: string; durationSeconds?: number }
+            | undefined;
+          const youtubeId = String(rawSong?.youtubeId || '').trim();
+          if (!/^[a-zA-Z0-9_-]{11}$/.test(youtubeId)) return;
+
+          const musicState = ensureYmRoomMusicState(roomId);
+          const already = musicState.playlist.find((t) => t.youtubeId === youtubeId);
+          if (already) {
+            sendJson(ws, 'toast', {
+              message: `Bài "${already.title}" đã có sẵn trong danh sách phòng.`,
+              type: 'info',
+            });
+            return;
+          }
+
+          const newTrack: YmRoomTrack = {
+            trackId: `trk-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            youtubeId,
+            title: String(rawSong?.title || `Bài hát YouTube (${youtubeId})`).trim().slice(0, 140),
+            artist: String(rawSong?.artist || 'Nguồn YouTube').trim().slice(0, 80),
+            durationSeconds:
+              typeof rawSong?.durationSeconds === 'number' && rawSong.durationSeconds > 0
+                ? Math.round(rawSong.durationSeconds)
+                : 240,
+            addedByUserId: session.userId,
+            addedByName: session.userName,
+            addedAt: Date.now(),
+          };
+
+          musicState.playlist.push(newTrack);
+          if (musicState.playlist.length > 50) {
+            const firstNonPlayingIdx = musicState.playlist.findIndex(
+              (t) => t.trackId !== musicState.currentTrack?.trackId
+            );
+            if (firstNonPlayingIdx >= 0) musicState.playlist.splice(firstNonPlayingIdx, 1);
+          }
+          if (!musicState.currentTrack) {
+            musicState.currentTrack = newTrack;
+          }
+
+          const notice: YmMessage = {
+            id: `ym-trk-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+            roomId,
+            sender: 'Hệ thống phòng',
+            text: `${session.userName} vừa thêm bài "${newTrack.title}" vào danh sách nhạc phòng.`,
+            timestamp: nowTimeStr(),
+            color: '#34D399',
+          };
+          const list = ensureYmRoomHistory(roomId);
+          list.push(notice);
+          if (list.length > 80) list.shift();
+          ymHistory.set(roomId, list);
+
+          broadcastYmRoom(roomId, 'ym:message', { message: notice });
+          broadcastYmRoomMusic(roomId);
+          broadcastYmDirectory();
+          return;
+        }
+
+        if (msg.type === 'ym:playlist_remove') {
+          const roomId = String(payload.roomId || session.ymRoomId || '');
+          const trackId = String(payload.trackId || '');
+          if (!roomId || !trackId || session.ymRoomId !== roomId) return;
+          const musicState = ensureYmRoomMusicState(roomId);
+          const idx = musicState.playlist.findIndex((t) => t.trackId === trackId);
+          if (idx < 0) return;
+          const target = musicState.playlist[idx];
+          if (musicState.hostUserId !== session.userId && target.addedByUserId !== session.userId) {
+            return;
+          }
+          musicState.playlist.splice(idx, 1);
+          if (musicState.currentTrack?.trackId === trackId) {
+            musicState.currentTrack = musicState.playlist[0] ?? null;
+            musicState.positionSeconds = 0;
+            if (!musicState.currentTrack) musicState.isPlaying = false;
+            musicState.syncedAt = Date.now();
+          }
+          broadcastYmRoomMusic(roomId);
           broadcastYmDirectory();
           return;
         }
@@ -2919,14 +3287,8 @@ async function bootstrap() {
       if (!session) return;
       leaveKaraokeRoom(session);
       leaveServerGameRoom(session);
-      const prevYm = session.ymRoomId;
       clients.delete(sessionUserId);
-      if (prevYm) {
-        broadcastYmRoom(prevYm, 'ym:presence', {
-          roomId: prevYm,
-          users: getYmRoomUsers(prevYm),
-        });
-      }
+      leaveYmRoom(session);
       broadcastYmDirectory();
     });
   });
@@ -2972,20 +3334,30 @@ async function bootstrap() {
           seoDesc =
             'Vào phòng hát karaoke trực tuyến miễn phí, bật mic echo trộn nhạc nền YouTube, tặng tim cổ vũ ca sĩ và hát karaoke không quảng cáo cùng bạn bè.';
         } else if (reqPath === '/phong-chat-va-game') {
-          seoTitle = 'Phòng Chat Yahoo 63 Tỉnh Thành & Sảnh Game | Karaoke Online';
+          seoTitle = 'Phòng Chat 34 Tỉnh Thành Mới & Sảnh Game | Karaoke Online';
           seoDesc =
-            'Chat chung 63 tỉnh thành Việt Nam, chat riêng 1-1, chơi Tiến Lên & Cờ Caro kết hợp hát karaoke và nghe nhạc YouTube MP3 không quảng cáo.';
+            'Chat chung 34 tỉnh thành mới Việt Nam, chat riêng 1-1, chơi Tiến Lên & Cờ Caro kết hợp hát karaoke và nghe nhạc YouTube MP3 không quảng cáo.';
         } else {
-          const media = parseMediaUrlPath(reqPath);
-          if (media) {
-            const matchedSong = KARAOKE_SONGS.find((s) => s.youtubeId === media.youtubeId);
-            const cleanTitle = matchedSong?.title || media.rawSlug.replace(/-/g, ' ');
-            if (media.kind === 'mp3') {
-              seoTitle = `${cleanTitle} MP3 — Nghe Nhạc YouTube MP3 | Karaoke Online`;
-              seoDesc = `Nghe nhạc YouTube MP3 bài ${cleanTitle}. Nghe nhạc không quảng cáo pop-up ngay trong trình duyệt điện thoại, hỗ trợ tắt màn hình.`;
-            } else {
-              seoTitle = `${cleanTitle} — Hát Karaoke Không Quảng Cáo | Karaoke Online`;
-              seoDesc = `Hát karaoke không quảng cáo bài ${cleanTitle}${matchedSong ? ` (${matchedSong.artist})` : ''}. Beat chuẩn chữ chạy mượt trên trình duyệt điện thoại và TV.`;
+          const rawCommunityRoomId = parseCommunityRoomPath(reqPath);
+          const resolvedRoomId = rawCommunityRoomId
+            ? resolveVietnamChatRoomId(rawCommunityRoomId)
+            : null;
+          if (rawCommunityRoomId && resolvedRoomId && VIETNAM_CHAT_ROOM_MAP.has(resolvedRoomId)) {
+            const roomDef = getVietnamChatRoom(resolvedRoomId);
+            seoTitle = `${roomDef.name} (${roomDef.group}) — Nghe Nhạc & Chat Online | Karaoke Online`;
+            seoDesc = `${roomDef.topic}. Tham gia ${roomDef.name} để chat chung, chat riêng 1-1 và nghe nhạc ${roomDef.suggestedGenre} không quảng cáo cùng mọi người.`;
+          } else {
+            const media = parseMediaUrlPath(reqPath);
+            if (media) {
+              const matchedSong = KARAOKE_SONGS.find((s) => s.youtubeId === media.youtubeId);
+              const cleanTitle = matchedSong?.title || media.rawSlug.replace(/-/g, ' ');
+              if (media.kind === 'mp3') {
+                seoTitle = `${cleanTitle} MP3 — Nghe Nhạc YouTube MP3 | Karaoke Online`;
+                seoDesc = `Nghe nhạc YouTube MP3 bài ${cleanTitle}. Nghe nhạc không quảng cáo pop-up ngay trong trình duyệt điện thoại, hỗ trợ tắt màn hình.`;
+              } else {
+                seoTitle = `${cleanTitle} — Hát Karaoke Không Quảng Cáo | Karaoke Online`;
+                seoDesc = `Hát karaoke không quảng cáo bài ${cleanTitle}${matchedSong ? ` (${matchedSong.artist})` : ''}. Beat chuẩn chữ chạy mượt trên trình duyệt điện thoại và TV.`;
+              }
             }
           }
         }

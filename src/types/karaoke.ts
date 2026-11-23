@@ -73,6 +73,36 @@ export interface OnlineChatMember {
   roomName: string;
 }
 
+export interface YmRoomTrack {
+  trackId: string;
+  youtubeId: string;
+  title: string;
+  artist: string;
+  durationSeconds: number;
+  addedByUserId: string;
+  addedByName: string;
+  addedAt: number;
+}
+
+export interface YmRoomMusicState {
+  roomId: string;
+  hostUserId: string | null;
+  hostName: string | null;
+  currentTrack: YmRoomTrack | null;
+  playlist: YmRoomTrack[];
+  isPlaying: boolean;
+  positionSeconds: number;
+  syncedAt: number;
+}
+
+export interface YmRoomSummaryInfo {
+  count: number;
+  hostName: string | null;
+  currentTrackTitle: string | null;
+  isPlaying: boolean;
+  playlistCount: number;
+}
+
 export interface ChatMessage {
   id: string;
   roomId: string;

@@ -1,29 +1,28 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
-  Send,
-  Smile,
-  BellRing,
   Users,
-  Bold,
-  Italic,
-  Music,
-  Edit3,
-  Check,
-  MessageSquare,
   MapPin,
   Lock,
   MessageCircle,
   Search,
-  ChevronDown,
+  Music2,
+  Edit3,
+  Check,
+  ArrowRight,
+  Crown,
+  Play,
+  Send,
+  BellRing,
   X,
-  Globe,
+  Disc3,
 } from 'lucide-react';
 import {
   ChatMessage,
-  ChatRoomId,
   OnlineChatMember,
   PrivateChatMessage,
   Song,
+  YmRoomMusicState,
+  YmRoomSummaryInfo,
 } from '../types/karaoke';
 import {
   ChatRoomGroup,
@@ -32,164 +31,117 @@ import {
 } from '../../shared/vietnamChatRooms';
 import { playBuzzSound, removeVietnameseTones } from '../utils/vietnamese';
 import { WsListener } from '../hooks/useRealtimeSocket';
+import { CommunityRoomPage } from './CommunityRoomPage';
 
 interface YahooChatProps {
   userId: string;
   nickname: string;
   onNicknameChange: (nextNick: string) => void;
+  selectedRoomId: string | null;
+  onSelectRoom: (roomId: string | null) => void;
   currentSong: Song;
   incomingSharedSong: { song: Song; seq: number } | null;
   connected: boolean;
   sendEvent: (type: string, payload?: Record<string, unknown>) => void;
   subscribe: (listener: WsListener) => () => void;
-  onPlaySharedSong: (youtubeId: string, title: string, artist: string) => void;
+  onParallelKaraoke: (youtubeId: string, title: string, artist: string) => void;
+  isParallelKaraokeActive: boolean;
+  localRoomMuted: boolean;
+  onSetLocalRoomMuted: (muted: boolean) => void;
   onToast: (message: string, type?: 'info' | 'success' | 'warning') => void;
 }
 
-const STORAGE_YM_ROOM_KEY = 'karaoke_ym_room_v1';
-
-const PINNED_ROOM_IDS = [
-  'nhac-tre',
-  'bolero',
-  'game-thu',
-  'tinh-ha-noi',
-  'tinh-tp-hcm',
-  'tinh-da-nang',
-  'tinh-can-tho',
-];
-
-const ROOM_GROUPS: ChatRoomGroup[] = [
-  'Chủ đề chung',
+const PROVINCE_REGIONS: Array<'Tất cả 34 tỉnh' | Exclude<ChatRoomGroup, 'Thể loại nhạc'>> = [
+  'Tất cả 34 tỉnh',
   'Miền Bắc',
   'Miền Trung & Tây Nguyên',
   'Miền Nam',
 ];
 
-const YAHOO_EMOTICONS: { code: string; label: string; emoji: string }[] = [
-  { code: ':))', label: 'Cười tươi', emoji: '😄' },
-  { code: '=))', label: 'Cười lăn lộn', emoji: '🤣' },
-  { code: ';))', label: 'Nháy mắt', emoji: '😉' },
-  { code: ':D', label: 'Khoái chí', emoji: '😁' },
-  { code: ':-*', label: 'Hôn gió', emoji: '😘' },
-  { code: ':((', label: 'Khóc nhè', emoji: '😭' },
-  { code: ':-/', label: 'Phân vân', emoji: '😕' },
-  { code: 'B-)', label: 'Ngầu lòi', emoji: '😎' },
-  { code: ':P', label: 'Lè lưỡi', emoji: '😛' },
-  { code: '<3', label: 'Trái tim', emoji: '❤️' },
-];
-
-const TEXT_COLORS = ['#F8FAFC', '#FBBF24', '#38BDF8', '#F472B6', '#34D399', '#C084FC'];
-
-function renderTextWithEmoticons(text: string): string {
-  let out = text;
-  for (const emo of YAHOO_EMOTICONS) {
-    out = out.split(emo.code).join(` ${emo.emoji} `);
-  }
-  return out;
-}
-
-function nowTimeStr(): string {
-  const d = new Date();
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-}
-
-function getInitialRoomId(): ChatRoomId {
-  try {
-    const saved = localStorage.getItem(STORAGE_YM_ROOM_KEY);
-    if (saved && VIETNAM_CHAT_ROOMS.some((r) => r.id === saved)) {
-      return saved;
-    }
-  } catch {
-    // Ignore storage error
-  }
-  return 'nhac-tre';
-}
-
 export function YahooChat({
   userId,
   nickname,
   onNicknameChange,
-  currentSong,
+  selectedRoomId,
+  onSelectRoom,
   incomingSharedSong,
   connected,
   sendEvent,
   subscribe,
-  onPlaySharedSong,
+  onParallelKaraoke,
+  isParallelKaraokeActive,
+  localRoomMuted,
+  onSetLocalRoomMuted,
   onToast,
 }: YahooChatProps) {
   const [chatMode, setChatMode] = useState<'public' | 'private'>('public');
-  const [activeRoom, setActiveRoom] = useState<ChatRoomId>(getInitialRoomId);
-  const [showProvincePicker, setShowProvincePicker] = useState(false);
+  const [showLobbyDmDrawer, setShowLobbyDmDrawer] = useState(false);
+
   const [provinceSearch, setProvinceSearch] = useState('');
-  const [selectedRegionTab, setSelectedRegionTab] = useState<ChatRoomGroup | 'Tất cả'>('Tất cả');
+  const [selectedRegionTab, setSelectedRegionTab] = useState<
+    'Tất cả 34 tỉnh' | Exclude<ChatRoomGroup, 'Thể loại nhạc'>
+  >('Tất cả 34 tỉnh');
 
   const [isEditingNick, setIsEditingNick] = useState(false);
   const [nickDraft, setNickDraft] = useState(nickname);
 
-  // Public Room State
+  // Room Realtime State (for currently entered dedicated room)
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [roomUsers, setRoomUsers] = useState<Array<{ id: string; nickname: string }>>([]);
+  const [roomMusicState, setRoomMusicState] = useState<YmRoomMusicState | null>(null);
+
+  // Global Directory & Member Counts across all rooms
   const [onlineDirectory, setOnlineDirectory] = useState<OnlineChatMember[]>([]);
   const [roomCounts, setRoomCounts] = useState<Record<string, number>>({});
-  const [rosterTab, setRosterTab] = useState<'room' | 'all'>('room');
+  const [roomSummaries, setRoomSummaries] = useState<Record<string, YmRoomSummaryInfo>>({});
 
   // Private 1-1 Chat State
   const [activeDmPeer, setActiveDmPeer] = useState<{ id: string; nickname: string } | null>(null);
   const [dmThreads, setDmThreads] = useState<Record<string, PrivateChatMessage[]>>({});
   const [dmPeerNames, setDmPeerNames] = useState<Record<string, string>>({});
   const [unreadByPeer, setUnreadByPeer] = useState<Record<string, number>>({});
+  const [lobbyDmInput, setLobbyDmInput] = useState('');
 
-  // Composer State
-  const [inputText, setInputText] = useState('');
-  const [textColor, setTextColor] = useState('#F8FAFC');
-  const [isBold, setIsBold] = useState(false);
-  const [isItalic, setIsItalic] = useState(false);
-  const [showEmoticons, setShowEmoticons] = useState(false);
-  const [showMembersMobile, setShowMembersMobile] = useState(false);
-  const [isBuzzing, setIsBuzzing] = useState(false);
-
-  const messagesEndRef = useRef<HTMLDivElement>(null);
   const lastSharedSeqRef = useRef<number>(0);
   const chatModeRef = useRef(chatMode);
   const activeDmPeerIdRef = useRef<string | null>(activeDmPeer?.id ?? null);
+  const selectedRoomIdRef = useRef<string | null>(selectedRoomId);
+  const lobbyDmEndRef = useRef<HTMLDivElement>(null);
 
   chatModeRef.current = chatMode;
   activeDmPeerIdRef.current = activeDmPeer?.id ?? null;
+  selectedRoomIdRef.current = selectedRoomId;
 
-  const triggerBuzzVisual = useCallback(() => {
-    setIsBuzzing(true);
-    playBuzzSound();
-    window.setTimeout(() => setIsBuzzing(false), 500);
-  }, []);
-
-  // Persist chosen province / topic room
+  // Join or leave room on server when selectedRoomId changes
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_YM_ROOM_KEY, activeRoom);
-    } catch {
-      // Ignore
+    if (!connected) return;
+    if (selectedRoomId) {
+      setMessages([]);
+      setRoomUsers([]);
+      setRoomMusicState(null);
+      sendEvent('ym:join', { roomId: selectedRoomId, nickname });
+    } else {
+      sendEvent('ym:leave_room');
     }
-  }, [activeRoom]);
+  }, [selectedRoomId, connected, nickname, sendEvent]);
 
-  // Join public room on mount or room switch
-  useEffect(() => {
-    if (connected) {
-      sendEvent('ym:join', { roomId: activeRoom, nickname });
-    }
-  }, [activeRoom, connected, nickname, sendEvent]);
-
-  // Subscribe to real-time WebSocket public & private Yahoo events
+  // Subscribe to real-time WebSocket public, music, directory & private events
   useEffect(() => {
     const unsub = subscribe((type, payload) => {
       if (type === 'ym:history') {
         const roomId = String(payload.roomId || '');
-        if (roomId === activeRoom) {
+        if (roomId && roomId === selectedRoomIdRef.current) {
           setMessages((payload.messages as ChatMessage[]) || []);
         }
       } else if (type === 'ym:presence') {
         const roomId = String(payload.roomId || '');
-        if (roomId === activeRoom) {
+        if (roomId && roomId === selectedRoomIdRef.current) {
           setRoomUsers((payload.users as Array<{ id: string; nickname: string }>) || []);
+        }
+      } else if (type === 'ym:music_state') {
+        const state = payload.state as YmRoomMusicState | undefined;
+        if (state && state.roomId === selectedRoomIdRef.current) {
+          setRoomMusicState(state);
         }
       } else if (type === 'ym:directory') {
         if (Array.isArray(payload.onlineUsers)) {
@@ -198,16 +150,19 @@ export function YahooChat({
         if (payload.roomCounts && typeof payload.roomCounts === 'object') {
           setRoomCounts(payload.roomCounts as Record<string, number>);
         }
+        if (payload.roomSummaries && typeof payload.roomSummaries === 'object') {
+          setRoomSummaries(payload.roomSummaries as Record<string, YmRoomSummaryInfo>);
+        }
       } else if (type === 'ym:message') {
         const msg = payload.message as ChatMessage | undefined;
-        if (msg && msg.roomId === activeRoom) {
+        if (msg && msg.roomId === selectedRoomIdRef.current) {
           setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
         }
       } else if (type === 'ym:buzz') {
         const msg = payload.message as ChatMessage | undefined;
-        if (msg && msg.roomId === activeRoom) {
+        if (msg && msg.roomId === selectedRoomIdRef.current) {
           setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
-          triggerBuzzVisual();
+          playBuzzSound();
         }
       } else if (type === 'ym:dm_sync') {
         const threads = payload.threads as
@@ -244,9 +199,16 @@ export function YahooChat({
         });
 
         if (isIncoming) {
-          const isViewingThisThread =
-            chatModeRef.current === 'private' && activeDmPeerIdRef.current === peerId;
-          if (!isViewingThisThread) {
+          const viewingInRoom =
+            Boolean(selectedRoomIdRef.current) &&
+            chatModeRef.current === 'private' &&
+            activeDmPeerIdRef.current === peerId;
+          const viewingInLobby =
+            !selectedRoomIdRef.current &&
+            showLobbyDmDrawer &&
+            activeDmPeerIdRef.current === peerId;
+
+          if (!viewingInRoom && !viewingInLobby) {
             setUnreadByPeer((prev) => ({ ...prev, [peerId]: (prev[peerId] || 0) + 1 }));
             onToast(
               type === 'ym:dm_buzz'
@@ -256,53 +218,52 @@ export function YahooChat({
             );
           }
           if (type === 'ym:dm_buzz') {
-            triggerBuzzVisual();
+            playBuzzSound();
           }
         }
       }
     });
     return unsub;
-  }, [activeRoom, userId, subscribe, triggerBuzzVisual, onToast]);
+  }, [userId, subscribe, onToast, showLobbyDmDrawer]);
 
-  const activeDmMessages = useMemo(
-    () => (activeDmPeer ? dmThreads[activeDmPeer.id] || [] : []),
-    [activeDmPeer, dmThreads]
-  );
-
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-  }, [messages.length, activeDmMessages.length, activeRoom, chatMode, activeDmPeer?.id]);
-
-  // Handle incoming song shared from KaraokePlayer
+  // Handle song shared from KaraokePlayer -> enter default music room if in lobby
   useEffect(() => {
     if (!incomingSharedSong || incomingSharedSong.seq === lastSharedSeqRef.current) return;
     lastSharedSeqRef.current = incomingSharedSong.seq;
+    const targetRoom = selectedRoomId || 'nhac-tre';
+    if (!selectedRoomId) {
+      onSelectRoom(targetRoom);
+    }
     const { song } = incomingSharedSong;
-    sendEvent('ym:send', {
-      roomId: activeRoom,
-      message: {
-        id: `share-${Date.now()}`,
-        roomId: activeRoom,
-        sender: nickname,
-        text: `Mời cả phòng cùng hát bài "${song.title}" nhé! :D`,
-        timestamp: nowTimeStr(),
-        color: '#FBBF24',
-        isBold: true,
-        sharedSong: {
-          title: song.title,
-          artist: song.artist,
-          youtubeId: song.youtubeId,
+    window.setTimeout(() => {
+      sendEvent('ym:send', {
+        roomId: targetRoom,
+        message: {
+          id: `share-${Date.now()}`,
+          roomId: targetRoom,
+          sender: nickname,
+          text: `Mời cả phòng cùng hát bài "${song.title}" nhé! :D`,
+          timestamp: new Date().toTimeString().slice(0, 5),
+          color: '#FBBF24',
+          isBold: true,
+          sharedSong: {
+            title: song.title,
+            artist: song.artist,
+            youtubeId: song.youtubeId,
+          },
         },
-      },
-    });
-  }, [incomingSharedSong, activeRoom, nickname, sendEvent]);
+      });
+    }, 180);
+  }, [incomingSharedSong, selectedRoomId, nickname, sendEvent, onSelectRoom]);
 
   const openPrivateChat = useCallback(
     (peer: { id: string; nickname: string }) => {
       if (!peer.id || peer.id === userId) return;
       setActiveDmPeer(peer);
       setChatMode('private');
-      setShowMembersMobile(false);
+      if (!selectedRoomIdRef.current) {
+        setShowLobbyDmDrawer(true);
+      }
       setUnreadByPeer((prev) => {
         if (!prev[peer.id]) return prev;
         const copy = { ...prev };
@@ -317,142 +278,22 @@ export function YahooChat({
     [userId, connected, sendEvent]
   );
 
-  const handleSendMessage = () => {
-    const trimmed = inputText.trim();
-    if (!trimmed) return;
+  const activeDmMessages = useMemo(
+    () => (activeDmPeer ? dmThreads[activeDmPeer.id] || [] : []),
+    [activeDmPeer, dmThreads]
+  );
 
-    if (chatMode === 'private') {
-      if (!activeDmPeer) {
-        onToast('Hãy chọn một thành viên online để chat riêng.', 'info');
-        return;
-      }
-      sendEvent('ym:dm_send', {
-        toUserId: activeDmPeer.id,
-        toName: activeDmPeer.nickname,
-        message: {
-          id: `dm-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          text: trimmed,
-          color: textColor,
-          isBold,
-          isItalic,
-        },
-      });
-      setInputText('');
-      setShowEmoticons(false);
-      return;
+  useEffect(() => {
+    if (showLobbyDmDrawer) {
+      lobbyDmEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
-
-    const msg: ChatMessage = {
-      id: `ym-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      roomId: activeRoom,
-      sender: nickname,
-      text: trimmed,
-      timestamp: nowTimeStr(),
-      color: textColor,
-      isBold,
-      isItalic,
-    };
-
-    sendEvent('ym:send', { roomId: activeRoom, message: msg });
-    setInputText('');
-    setShowEmoticons(false);
-  };
-
-  const handleBuzz = () => {
-    triggerBuzzVisual();
-    if (chatMode === 'private') {
-      if (!activeDmPeer) {
-        onToast('Hãy chọn người nhận để gửi BUZZ! riêng.', 'info');
-        return;
-      }
-      sendEvent('ym:dm_buzz', {
-        toUserId: activeDmPeer.id,
-        toName: activeDmPeer.nickname,
-      });
-      onToast(`Đã gửi BUZZ! riêng cho ${activeDmPeer.nickname}!`, 'warning');
-      return;
-    }
-    sendEvent('ym:buzz', { roomId: activeRoom, nickname });
-    onToast('Bạn vừa gửi BUZZ! rung phòng chat!', 'warning');
-  };
-
-  const handleShareCurrentSong = () => {
-    if (chatMode === 'private') {
-      if (!activeDmPeer) {
-        onToast('Hãy chọn một người bạn để gửi bài hát riêng.', 'info');
-        return;
-      }
-      sendEvent('ym:dm_send', {
-        toUserId: activeDmPeer.id,
-        toName: activeDmPeer.nickname,
-        message: {
-          id: `dm-share-${Date.now()}`,
-          text: `Mời bạn nghe & hát cùng mình bài "${currentSong.title}" nhé!`,
-          color: '#FBBF24',
-          isBold: true,
-          sharedSong: {
-            title: currentSong.title,
-            artist: currentSong.artist,
-            youtubeId: currentSong.youtubeId,
-          },
-        },
-      });
-      return;
-    }
-
-    sendEvent('ym:send', {
-      roomId: activeRoom,
-      message: {
-        id: `share-${Date.now()}`,
-        roomId: activeRoom,
-        sender: nickname,
-        text: `Đang nghe bài "${currentSong.title}" cùng mọi người nè!`,
-        timestamp: nowTimeStr(),
-        color: '#FBBF24',
-        sharedSong: {
-          title: currentSong.title,
-          artist: currentSong.artist,
-          youtubeId: currentSong.youtubeId,
-        },
-      },
-    });
-  };
-
-  const handleSaveNickname = () => {
-    const clean = nickDraft.trim().replace(/\s+/g, '_') || 'ca_si_online';
-    onNicknameChange(clean);
-    setNickDraft(clean);
-    setIsEditingNick(false);
-    onToast(`Đã đổi nickname thành "${clean}"`, 'success');
-  };
-
-  const activeRoomObj = getVietnamChatRoom(activeRoom);
+  }, [activeDmMessages.length, showLobbyDmDrawer, activeDmPeer?.id]);
 
   const totalUnreadPrivate = useMemo(
     () => Object.values(unreadByPeer).reduce((acc, n) => acc + n, 0),
     [unreadByPeer]
   );
 
-  // Quick room pills (include active room if it's a non-pinned province)
-  const quickRooms = useMemo(() => {
-    const list = PINNED_ROOM_IDS.map((id) => getVietnamChatRoom(id));
-    if (!PINNED_ROOM_IDS.includes(activeRoom)) {
-      list.unshift(activeRoomObj);
-    }
-    return list;
-  }, [activeRoom, activeRoomObj]);
-
-  // Searchable 63 provinces + topic rooms for picker
-  const filteredDirectoryRooms = useMemo(() => {
-    const q = removeVietnameseTones(provinceSearch);
-    return VIETNAM_CHAT_ROOMS.filter((room) => {
-      if (selectedRegionTab !== 'Tất cả' && room.group !== selectedRegionTab) return false;
-      if (!q) return true;
-      return removeVietnameseTones(`${room.name} ${room.shortName} ${room.group}`).includes(q);
-    });
-  }, [provinceSearch, selectedRegionTab]);
-
-  // Combined peer list for Chat Riêng (existing threads + all online members)
   const dmPeerList = useMemo(() => {
     const map = new Map<
       string,
@@ -502,318 +343,184 @@ export function YahooChat({
     });
   }, [onlineDirectory, dmThreads, dmPeerNames, unreadByPeer, userId]);
 
-  const otherOnlineInRoom = roomUsers;
-  const totalOnlineAllRooms = Math.max(1, onlineDirectory.length);
+  const musicGenreRooms = useMemo(
+    () => VIETNAM_CHAT_ROOMS.filter((r) => r.group === 'Thể loại nhạc'),
+    []
+  );
 
+  const filteredProvinceRooms = useMemo(() => {
+    const q = removeVietnameseTones(provinceSearch);
+    return VIETNAM_CHAT_ROOMS.filter((room) => {
+      if (room.group === 'Thể loại nhạc') return false;
+      if (selectedRegionTab !== 'Tất cả 34 tỉnh' && room.group !== selectedRegionTab) return false;
+      if (!q) return true;
+      return removeVietnameseTones(
+        `${room.name} ${room.shortName} ${room.group} ${room.topic}`
+      ).includes(q);
+    });
+  }, [provinceSearch, selectedRegionTab]);
+
+  const totalOnlineUsers = Math.max(1, onlineDirectory.length);
+
+  const handleSaveNickname = () => {
+    const clean = nickDraft.trim().replace(/\s+/g, '_') || 'ca_si_online';
+    onNicknameChange(clean);
+    setNickDraft(clean);
+    setIsEditingNick(false);
+    onToast(`Đã đổi nickname thành "${clean}"`, 'success');
+  };
+
+  // Dedicated Room View ("Trang riêng" for selected Music Genre or Province Room)
+  if (selectedRoomId) {
+    const roomDef = getVietnamChatRoom(selectedRoomId);
+    return (
+      <CommunityRoomPage
+        room={roomDef}
+        userId={userId}
+        nickname={nickname}
+        onNicknameChange={onNicknameChange}
+        musicState={roomMusicState}
+        roomUsers={roomUsers}
+        onlineDirectory={onlineDirectory}
+        messages={messages}
+        chatMode={chatMode}
+        onChangeChatMode={setChatMode}
+        activeDmPeer={activeDmPeer}
+        dmPeerList={dmPeerList}
+        activeDmMessages={activeDmMessages}
+        totalUnreadPrivate={totalUnreadPrivate}
+        onOpenPrivateChat={openPrivateChat}
+        onLeaveRoom={() => {
+          sendEvent('ym:leave_room');
+          onSelectRoom(null);
+        }}
+        sendEvent={sendEvent}
+        onParallelKaraoke={onParallelKaraoke}
+        isParallelKaraokeActive={isParallelKaraokeActive}
+        localRoomMuted={localRoomMuted}
+        onSetLocalRoomMuted={onSetLocalRoomMuted}
+        onToast={onToast}
+      />
+    );
+  }
+
+  // Room Directory Lobby (Organized Music Genre Rooms + 63 Province Rooms + Member Counts)
   return (
-    <div
-      id="lounge-section"
-      className={`rounded-2xl overflow-hidden border border-purple-500/35 bg-[#12131C] shadow-2xl flex flex-col h-[640px] relative ${
-        isBuzzing ? 'animate-buzz' : ''
-      }`}
-    >
-      {/* Classic Yahoo! Messenger Purple Title Bar */}
-      <div className="bg-gradient-to-r from-[#581C87] via-[#6B21A8] to-[#4C1D95] px-3.5 py-2.5 flex items-center justify-between gap-2.5 border-b border-purple-400/25 shrink-0">
-        <div className="flex items-center gap-2.5 min-w-0">
-          <span className="w-7 h-7 rounded-full bg-amber-400 text-slate-950 flex items-center justify-center font-bold text-xs shadow-sm shrink-0">
-            Y!
-          </span>
-          <div className="min-w-0">
-            <h2 className="font-display text-sm sm:text-base font-bold text-white truncate">
-              {chatMode === 'public'
-                ? `Yahoo! Chat Chung — ${activeRoomObj.name}`
-                : activeDmPeer
-                  ? `Chat Riêng — ${activeDmPeer.nickname}`
-                  : 'Yahoo! Chat Riêng 1-1'}
-            </h2>
-            <p className="text-[11px] text-purple-200/80 truncate">
-              {chatMode === 'public'
-                ? activeRoomObj.topic
-                : activeDmPeer
-                  ? 'Cuộc trò chuyện riêng tư chỉ hai người nhìn thấy'
-                  : 'Chọn thành viên đang online để nhắn tin riêng tư 1-1'}
-            </p>
+    <div id="lounge-section" className="space-y-6">
+      {/* Top Lobby Header Bar */}
+      <div className="rounded-2xl border border-purple-500/35 bg-[#12131C] p-4 sm:p-5 shadow-xl space-y-5">
+        <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-slate-800/80">
+          <div className="flex items-center gap-3">
+            <span className="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-600 to-amber-500 text-white flex items-center justify-center font-bold text-sm shadow-md shrink-0">
+              Y!
+            </span>
+            <div>
+              <h2 className="font-display text-lg sm:text-xl font-bold text-slate-50">
+                Phòng Nghe Nhạc &amp; Chat Cộng Đồng Toàn Quốc
+              </h2>
+              <p className="text-xs sm:text-sm text-slate-400">
+                Chọn phòng Thể Loại Nhạc hoặc 34 Tỉnh Thành Mới để vào trang riêng · Chủ phòng bật bài hát, thành viên góp bài &amp; trò chuyện
+              </p>
+            </div>
           </div>
-        </div>
 
-        {/* Mode Switcher: Chat Chung vs Chat Riêng */}
-        <div className="flex items-center gap-1.5 shrink-0">
-          <div className="flex items-center p-0.5 rounded-lg bg-purple-950/70 border border-purple-400/30">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/15 border border-emerald-500/35 text-xs font-semibold text-emerald-300 tabular-nums">
+              <Users className="w-3.5 h-3.5" />
+              <span>{totalOnlineUsers} đang online</span>
+            </span>
+
             <button
               type="button"
-              onClick={() => {
-                setChatMode('public');
-                setShowMembersMobile(false);
-              }}
-              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
-                chatMode === 'public'
-                  ? 'bg-amber-400 text-slate-950'
-                  : 'text-purple-100 hover:bg-purple-800/60'
-              }`}
-            >
-              <Globe className="w-3.5 h-3.5" />
-              <span>Chat chung</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setChatMode('private');
-                setShowProvincePicker(false);
-                if (activeDmPeer && unreadByPeer[activeDmPeer.id]) {
-                  setUnreadByPeer((prev) => {
-                    const next = { ...prev };
-                    delete next[activeDmPeer.id];
-                    return next;
-                  });
-                }
-              }}
-              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
-                chatMode === 'private'
-                  ? 'bg-amber-400 text-slate-950'
-                  : 'text-purple-100 hover:bg-purple-800/60'
+              onClick={() => setShowLobbyDmDrawer((v) => !v)}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors cursor-pointer ${
+                showLobbyDmDrawer
+                  ? 'bg-amber-500 text-slate-950 border-amber-400'
+                  : 'bg-purple-600/20 hover:bg-purple-600/35 text-purple-200 border-purple-500/40'
               }`}
             >
               <Lock className="w-3.5 h-3.5" />
-              <span>Chat riêng</span>
+              <span>Chat Riêng 1-1</span>
               {totalUnreadPrivate > 0 && (
-                <span className="ml-0.5 px-1.5 py-0.2 rounded-full bg-rose-500 text-white font-mono text-[10px] leading-tight tabular-nums">
+                <span className="px-1.5 py-0.2 rounded-full bg-rose-500 text-white font-mono text-[10px] tabular-nums">
                   {totalUnreadPrivate}
                 </span>
               )}
             </button>
-          </div>
 
-          <button
-            type="button"
-            onClick={() => setShowMembersMobile((v) => !v)}
-            className="sm:hidden inline-flex items-center gap-1 px-2 py-1 rounded bg-purple-950/60 text-purple-100 text-xs font-medium border border-purple-400/30 shrink-0"
-            aria-label="Hiện danh sách thành viên"
-          >
-            <Users className="w-3.5 h-3.5" />
-            <span className="tabular-nums">{totalOnlineAllRooms}</span>
-          </button>
-        </div>
-      </div>
-
-      {/* Room Switcher (63 Vietnam Provinces + Topic Rooms) & Nickname Bar */}
-      <div className="bg-[#191B28] border-b border-slate-800 px-3 py-2 flex flex-wrap items-center justify-between gap-2 shrink-0">
-        {chatMode === 'public' ? (
-          <div className="flex items-center gap-1.5 flex-1 min-w-0 overflow-x-auto custom-scrollbar pb-0.5">
-            <button
-              type="button"
-              onClick={() => setShowProvincePicker((v) => !v)}
-              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                showProvincePicker
-                  ? 'bg-amber-500 text-slate-950 border-amber-400'
-                  : 'bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border-amber-500/40'
-              }`}
-              title="Chọn phòng theo 63 tỉnh thành Việt Nam"
-            >
-              <MapPin className="w-3.5 h-3.5" />
-              <span>63 Tỉnh/Thành</span>
-              <ChevronDown
-                className={`w-3.5 h-3.5 transition-transform ${
-                  showProvincePicker ? 'rotate-180' : ''
-                }`}
-              />
-            </button>
-
-            {quickRooms.map((room) => {
-              const count = roomCounts[room.id] || 0;
-              return (
+            <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs">
+              <span className="text-slate-400">Nick:</span>
+              {isEditingNick ? (
+                <div className="flex items-center gap-1">
+                  <input
+                    type="text"
+                    value={nickDraft}
+                    onChange={(e) => setNickDraft(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleSaveNickname()}
+                    maxLength={22}
+                    className="w-24 h-6 px-2 rounded bg-slate-950 border border-purple-500 text-xs text-slate-100 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleSaveNickname}
+                    className="p-1 rounded bg-emerald-600 text-white cursor-pointer"
+                  >
+                    <Check className="w-3 h-3" />
+                  </button>
+                </div>
+              ) : (
                 <button
-                  key={room.id}
                   type="button"
                   onClick={() => {
-                    setActiveRoom(room.id);
-                    setShowProvincePicker(false);
+                    setNickDraft(nickname);
+                    setIsEditingNick(true);
                   }}
-                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                    activeRoom === room.id
-                      ? 'bg-purple-600 text-white font-semibold'
-                      : 'bg-slate-800/80 text-slate-300 hover:bg-slate-700'
-                  }`}
+                  className="inline-flex items-center gap-1 text-amber-300 hover:text-amber-200 font-semibold cursor-pointer"
                 >
-                  <span>{room.shortName}</span>
-                  {count > 0 && (
-                    <span className="font-mono text-[10px] px-1 rounded bg-black/25 text-amber-300 tabular-nums">
-                      {count}
-                    </span>
-                  )}
+                  <span>{nickname}</span>
+                  <Edit3 className="w-3 h-3" />
                 </button>
-              );
-            })}
-          </div>
-        ) : (
-          <div className="flex items-center gap-2 text-xs text-slate-300">
-            <Lock className="w-3.5 h-3.5 text-amber-400" />
-            <span>
-              {activeDmPeer
-                ? `Đang chat riêng với ${activeDmPeer.nickname}`
-                : 'Chọn người online bên phải (hoặc bấm danh sách bên trái) để nhắn riêng'}
-            </span>
-          </div>
-        )}
-
-        <div className="flex items-center gap-1.5 text-xs shrink-0">
-          <span className="text-slate-400">Nick:</span>
-          {isEditingNick ? (
-            <div className="flex items-center gap-1">
-              <input
-                type="text"
-                value={nickDraft}
-                onChange={(e) => setNickDraft(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleSaveNickname()}
-                maxLength={22}
-                className="w-28 h-7 px-2 rounded bg-slate-900 border border-purple-500 text-xs text-slate-100 focus:outline-none"
-              />
-              <button
-                type="button"
-                onClick={handleSaveNickname}
-                className="p-1 rounded bg-emerald-600 text-white hover:bg-emerald-500 cursor-pointer"
-                aria-label="Lưu nickname"
-              >
-                <Check className="w-3.5 h-3.5" />
-              </button>
+              )}
             </div>
-          ) : (
-            <button
-              type="button"
-              onClick={() => {
-                setNickDraft(nickname);
-                setIsEditingNick(true);
-              }}
-              className="inline-flex items-center gap-1 text-amber-300 hover:text-amber-200 font-semibold cursor-pointer"
-              title="Bấm để đổi nickname"
-            >
-              <span>{nickname}</span>
-              <Edit3 className="w-3 h-3" />
-            </button>
-          )}
+          </div>
         </div>
-      </div>
 
-      {/* Searchable 63 Vietnam Provinces Drawer Overlay */}
-      {showProvincePicker && chatMode === 'public' && (
-        <div className="absolute inset-x-3 top-28 bottom-3 z-30 rounded-xl bg-[#161927] border border-amber-500/40 shadow-2xl flex flex-col overflow-hidden">
-          <div className="p-3 border-b border-slate-800 bg-slate-900/80 space-y-2.5 shrink-0">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2 text-xs font-bold text-amber-300">
-                <MapPin className="w-4 h-4" />
-                <span>Chọn Phòng Chat 63 Tỉnh/Thành Việt Nam &amp; Chủ Đề</span>
-              </div>
+        {/* Optional Lobby Private 1-1 Chat Panel */}
+        {showLobbyDmDrawer && (
+          <div className="rounded-xl border border-purple-500/40 bg-[#0D0F17] overflow-hidden">
+            <div className="px-3.5 py-2.5 bg-purple-950/50 border-b border-slate-800 flex items-center justify-between">
+              <span className="text-xs font-bold text-purple-200 flex items-center gap-1.5">
+                <MessageCircle className="w-4 h-4 text-amber-400" />
+                <span>Hộp Thư Chat Riêng 1-1</span>
+              </span>
               <button
                 type="button"
-                onClick={() => setShowProvincePicker(false)}
-                className="p-1 rounded-md text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer"
-                aria-label="Đóng danh sách tỉnh thành"
+                onClick={() => setShowLobbyDmDrawer(false)}
+                className="p-1 rounded text-slate-400 hover:text-white cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
-
-            <div className="relative">
-              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5 pointer-events-none" />
-              <input
-                type="text"
-                value={provinceSearch}
-                onChange={(e) => setProvinceSearch(e.target.value)}
-                placeholder="Tìm nhanh tỉnh/thành (vd: Hà Nội, Đà Nẵng, Nghệ An, Cần Thơ)..."
-                className="w-full h-8 pl-8 pr-3 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-amber-500"
-              />
-            </div>
-
-            <div className="flex flex-wrap gap-1">
-              {(['Tất cả', ...ROOM_GROUPS] as const).map((group) => (
-                <button
-                  key={group}
-                  type="button"
-                  onClick={() => setSelectedRegionTab(group)}
-                  className={`px-2 py-1 rounded text-[11px] font-semibold transition-colors cursor-pointer ${
-                    selectedRegionTab === group
-                      ? 'bg-amber-500 text-slate-950'
-                      : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-                  }`}
-                >
-                  {group}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="flex-1 overflow-y-auto custom-scrollbar p-3">
-            {filteredDirectoryRooms.length === 0 ? (
-              <p className="text-center text-xs text-slate-400 py-8">
-                Không tìm thấy phòng tỉnh/thành phù hợp.
-              </p>
-            ) : (
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
-                {filteredDirectoryRooms.map((room) => {
-                  const isActive = room.id === activeRoom;
-                  const count = roomCounts[room.id] || 0;
-                  return (
-                    <button
-                      key={room.id}
-                      type="button"
-                      onClick={() => {
-                        setActiveRoom(room.id);
-                        setShowProvincePicker(false);
-                        setProvinceSearch('');
-                      }}
-                      className={`px-2.5 py-2 rounded-lg text-left border transition-colors flex items-center justify-between gap-1.5 cursor-pointer ${
-                        isActive
-                          ? 'bg-purple-600/30 border-purple-400 text-white'
-                          : 'bg-slate-900/70 border-slate-800 hover:border-amber-500/40 hover:bg-slate-800 text-slate-200'
-                      }`}
-                    >
-                      <div className="min-w-0">
-                        <p className="text-xs font-semibold truncate">{room.shortName}</p>
-                        <p className="text-[10px] text-slate-400 truncate">{room.group}</p>
-                      </div>
-                      {count > 0 && (
-                        <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 shrink-0 tabular-nums">
-                          {count}
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Main Chat Area */}
-      <div className="flex-1 flex min-h-0 relative">
-        {/* Left Peer List in Private Chat Mode */}
-        {chatMode === 'private' && (
-          <div className="w-44 sm:w-52 bg-[#141724] border-r border-slate-800 flex flex-col shrink-0">
-            <div className="px-3 py-2 border-b border-slate-800 text-[11px] font-semibold text-slate-300 flex items-center justify-between">
-              <span>Hội thoại riêng</span>
-              <span className="font-mono text-amber-400 tabular-nums">{dmPeerList.length}</span>
-            </div>
-            <div className="flex-1 overflow-y-auto custom-scrollbar p-1.5 space-y-1">
-              {dmPeerList.length === 0 ? (
-                <div className="p-3 text-center text-[11px] text-slate-400 leading-relaxed">
-                  Chưa có người dùng khác online hoặc hội thoại nào. Khi có thành viên vào phòng, bạn có thể bấm để chat riêng 1-1!
-                </div>
-              ) : (
-                dmPeerList.map((peer) => {
-                  const selected = activeDmPeer?.id === peer.id;
-                  return (
+            <div className="grid grid-cols-1 md:grid-cols-12 h-72">
+              <div className="md:col-span-4 border-b md:border-b-0 md:border-r border-slate-800 overflow-y-auto custom-scrollbar p-2 space-y-1">
+                {dmPeerList.length === 0 ? (
+                  <p className="text-xs text-slate-400 p-3 text-center">
+                    Chưa có thành viên khác online để nhắn riêng.
+                  </p>
+                ) : (
+                  dmPeerList.map((peer) => (
                     <button
                       key={peer.id}
                       type="button"
                       onClick={() => openPrivateChat({ id: peer.id, nickname: peer.nickname })}
-                      className={`w-full px-2.5 py-2 rounded-lg text-left transition-colors cursor-pointer ${
-                        selected
+                      className={`w-full px-2.5 py-2 rounded-lg text-left flex items-center justify-between gap-2 cursor-pointer ${
+                        activeDmPeer?.id === peer.id
                           ? 'bg-purple-600/30 border border-purple-400/50'
-                          : 'hover:bg-slate-800/60 border border-transparent'
+                          : 'hover:bg-slate-800/60'
                       }`}
                     >
-                      <div className="flex items-center justify-between gap-1.5">
-                        <div className="flex items-center gap-1.5 min-w-0">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
                           <span
                             className={`w-2 h-2 rounded-full shrink-0 ${
                               peer.isOnline ? 'bg-emerald-400' : 'bg-slate-500'
@@ -823,449 +530,283 @@ export function YahooChat({
                             {peer.nickname}
                           </span>
                         </div>
-                        {peer.unread > 0 && (
-                          <span className="px-1.5 py-0.5 rounded-full bg-rose-500 text-white font-mono text-[10px] leading-none tabular-nums">
-                            {peer.unread}
-                          </span>
-                        )}
+                        <p className="text-[10px] text-slate-400 truncate pl-3.5">
+                          {peer.lastMessage || peer.roomName || 'Online'}
+                        </p>
                       </div>
-                      <p className="text-[10px] text-slate-400 truncate mt-0.5 pl-3.5">
-                        {peer.lastMessage || (peer.roomName ? `Phòng ${peer.roomName}` : 'Nhấn để nhắn riêng')}
-                      </p>
+                      {peer.unread > 0 && (
+                        <span className="px-1.5 py-0.5 rounded-full bg-rose-500 text-white text-[10px] font-bold">
+                          {peer.unread}
+                        </span>
+                      )}
                     </button>
-                  );
-                })
-              )}
+                  ))
+                )}
+              </div>
+
+              <div className="md:col-span-8 flex flex-col min-h-0">
+                <div className="flex-1 overflow-y-auto custom-scrollbar p-3 space-y-1.5 text-xs">
+                  {!activeDmPeer ? (
+                    <p className="text-slate-400 text-center py-12">
+                      Chọn một thành viên bên trái để bắt đầu nhắn riêng 1-1.
+                    </p>
+                  ) : (
+                    activeDmMessages.map((msg) => {
+                      const isMe = msg.fromUserId === userId;
+                      return (
+                        <div key={msg.id} className="break-words">
+                          <span className="font-mono text-[10px] text-slate-500 mr-1.5">
+                            [{msg.timestamp}]
+                          </span>
+                          <span
+                            className={`font-semibold mr-1.5 ${
+                              isMe ? 'text-amber-400' : 'text-emerald-300'
+                            }`}
+                          >
+                            {isMe ? nickname : msg.fromName}:
+                          </span>
+                          <span className={msg.isBuzz ? 'font-bold text-rose-500' : 'text-slate-100'}>
+                            {msg.isBuzz ? 'BUZZ!!!' : msg.text}
+                          </span>
+                        </div>
+                      );
+                    })
+                  )}
+                  <div ref={lobbyDmEndRef} />
+                </div>
+
+                {activeDmPeer && (
+                  <div className="p-2 border-t border-slate-800 flex items-center gap-2 bg-slate-900/70">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        playBuzzSound();
+                        sendEvent('ym:dm_buzz', {
+                          toUserId: activeDmPeer.id,
+                          toName: activeDmPeer.nickname,
+                        });
+                      }}
+                      className="px-2 py-1.5 rounded bg-rose-600/20 text-rose-400 border border-rose-500/40 text-[11px] font-bold cursor-pointer"
+                    >
+                      <BellRing className="w-3.5 h-3.5" />
+                    </button>
+                    <input
+                      type="text"
+                      value={lobbyDmInput}
+                      onChange={(e) => setLobbyDmInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && lobbyDmInput.trim()) {
+                          sendEvent('ym:dm_send', {
+                            toUserId: activeDmPeer.id,
+                            toName: activeDmPeer.nickname,
+                            message: { id: `dm-${Date.now()}`, text: lobbyDmInput.trim() },
+                          });
+                          setLobbyDmInput('');
+                        }
+                      }}
+                      placeholder={`Nhắn riêng cho ${activeDmPeer.nickname}...`}
+                      className="flex-1 h-8 px-2.5 rounded bg-slate-950 border border-slate-700 text-xs text-slate-100 focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!lobbyDmInput.trim()) return;
+                        sendEvent('ym:dm_send', {
+                          toUserId: activeDmPeer.id,
+                          toName: activeDmPeer.nickname,
+                          message: { id: `dm-${Date.now()}`, text: lobbyDmInput.trim() },
+                        });
+                        setLobbyDmInput('');
+                      }}
+                      className="px-3 h-8 rounded bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold cursor-pointer"
+                    >
+                      <Send className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         )}
 
-        {/* Center Message Stream + Toolbar + Composer */}
-        <div className="flex-1 flex flex-col min-w-0 bg-[#0D0F17]">
-          <div className="flex-1 overflow-y-auto custom-scrollbar p-3.5 space-y-2.5 text-sm">
-            {chatMode === 'public' ? (
-              messages.map((msg) => {
-                const isMe = msg.sender === nickname || (msg.senderId && msg.senderId === userId);
-                const canClickPrivate = Boolean(msg.senderId && msg.senderId !== userId);
-                return (
-                  <div key={msg.id} className="leading-relaxed break-words">
-                    <span className="font-mono text-[11px] text-slate-500 mr-2 tabular-nums">
-                      [{msg.timestamp}]
-                    </span>
-                    {canClickPrivate ? (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          openPrivateChat({ id: msg.senderId!, nickname: msg.sender })
-                        }
-                        title={`Bấm để chat riêng với ${msg.sender}`}
-                        className="font-semibold mr-1.5 text-purple-300 hover:text-amber-300 hover:underline cursor-pointer"
-                      >
-                        {msg.sender}:
-                      </button>
-                    ) : (
-                      <span
-                        className={`font-semibold mr-1.5 ${
-                          isMe ? 'text-amber-400' : 'text-purple-300'
-                        }`}
-                      >
-                        {msg.sender}:
-                      </span>
-                    )}
-                    {msg.isBuzz ? (
-                      <span className="inline-block font-extrabold text-rose-500 tracking-wide">
-                        BUZZ!!! (Rung màn hình)
-                      </span>
-                    ) : (
-                      <span
-                        style={{ color: msg.color }}
-                        className={`${msg.isBold ? 'font-bold' : ''} ${
-                          msg.isItalic ? 'italic' : ''
-                        }`}
-                      >
-                        {renderTextWithEmoticons(msg.text)}
-                      </span>
-                    )}
-
-                    {msg.sharedSong && (
-                      <div className="mt-1.5 ml-12 inline-flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-slate-800/80 border border-amber-500/30">
-                        <Music className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                        <span className="text-xs text-slate-200">
-                          {msg.sharedSong.title} — {msg.sharedSong.artist}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            onPlaySharedSong(
-                              msg.sharedSong!.youtubeId,
-                              msg.sharedSong!.title,
-                              msg.sharedSong!.artist
-                            )
-                          }
-                          className="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-[11px] cursor-pointer"
-                        >
-                          Hát ngay
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                );
-              })
-            ) : !activeDmPeer ? (
-              <div className="h-full flex flex-col items-center justify-center text-center p-6 space-y-2.5">
-                <div className="w-11 h-11 rounded-full bg-purple-500/15 border border-purple-500/30 flex items-center justify-center text-purple-300">
-                  <Lock className="w-5 h-5" />
-                </div>
-                <p className="text-sm font-semibold text-slate-100">
-                  Chọn một thành viên để Chat Riêng 1-1
-                </p>
-                <p className="text-xs text-slate-400 max-w-xs">
-                  Tin nhắn riêng và BUZZ! chỉ hiển thị giữa bạn và người được chọn, hoàn toàn tách biệt với phòng Chat chung.
-                </p>
-              </div>
-            ) : activeDmMessages.length === 0 ? (
-              <div className="h-full flex flex-col items-center justify-center text-center p-6 space-y-2">
-                <MessageCircle className="w-8 h-8 text-purple-400/70" />
-                <p className="text-xs text-slate-300">
-                  Bắt đầu cuộc trò chuyện riêng với{' '}
-                  <strong className="text-amber-300">{activeDmPeer.nickname}</strong>!
-                </p>
-              </div>
-            ) : (
-              activeDmMessages.map((msg) => {
-                const isMe = msg.fromUserId === userId;
-                return (
-                  <div key={msg.id} className="leading-relaxed break-words">
-                    <span className="font-mono text-[11px] text-slate-500 mr-2 tabular-nums">
-                      [{msg.timestamp}]
-                    </span>
-                    <span
-                      className={`font-semibold mr-1.5 ${
-                        isMe ? 'text-amber-400' : 'text-emerald-300'
-                      }`}
-                    >
-                      {isMe ? nickname : msg.fromName}:
-                    </span>
-                    {msg.isBuzz ? (
-                      <span className="inline-block font-extrabold text-rose-500 tracking-wide">
-                        BUZZ!!! (Rung cửa sổ riêng)
-                      </span>
-                    ) : (
-                      <span
-                        style={{ color: msg.color }}
-                        className={`${msg.isBold ? 'font-bold' : ''} ${
-                          msg.isItalic ? 'italic' : ''
-                        }`}
-                      >
-                        {renderTextWithEmoticons(msg.text)}
-                      </span>
-                    )}
-
-                    {msg.sharedSong && (
-                      <div className="mt-1.5 ml-12 inline-flex items-center gap-2.5 px-3 py-1.5 rounded-lg bg-slate-800/80 border border-amber-500/30">
-                        <Music className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                        <span className="text-xs text-slate-200">
-                          {msg.sharedSong.title} — {msg.sharedSong.artist}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            onPlaySharedSong(
-                              msg.sharedSong!.youtubeId,
-                              msg.sharedSong!.title,
-                              msg.sharedSong!.artist
-                            )
-                          }
-                          className="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-[11px] cursor-pointer"
-                        >
-                          Hát ngay
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                );
-              })
-            )}
-            <div ref={messagesEndRef} />
+        {/* SECTION 1: Music Genre Rooms (8 phòng thể loại nhạc) */}
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="font-display text-base sm:text-lg font-bold text-amber-300 flex items-center gap-2">
+              <Disc3 className="w-5 h-5" />
+              <span>Phòng Theo Thể Loại Nhạc ({musicGenreRooms.length} phòng)</span>
+            </h3>
+            <span className="text-xs text-slate-400">
+              Bấm vào phòng để mở trang riêng · Chủ phòng bật nhạc
+            </span>
           </div>
 
-          {/* Formatting & BUZZ! Toolbar */}
-          <div className="relative px-3 py-1.5 bg-[#151824] border-t border-slate-800 flex items-center justify-between gap-2 shrink-0">
-            <div className="flex items-center gap-1.5">
-              <button
-                type="button"
-                onClick={handleBuzz}
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-rose-600/20 hover:bg-rose-600/35 text-rose-400 border border-rose-500/40 font-extrabold text-xs tracking-wide transition-colors cursor-pointer"
-                title="Gửi BUZZ! làm rung khung chat"
-              >
-                <BellRing className="w-3.5 h-3.5" />
-                <span>BUZZ!</span>
-              </button>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            {musicGenreRooms.map((room) => {
+              const count = roomCounts[room.id] || 0;
+              const summary = roomSummaries[room.id];
+              return (
+                <button
+                  key={room.id}
+                  type="button"
+                  onClick={() => onSelectRoom(room.id)}
+                  className="group text-left rounded-xl bg-slate-900/75 hover:bg-slate-800/90 border border-slate-800 hover:border-amber-500/50 p-3.5 flex flex-col justify-between gap-3 transition-all cursor-pointer"
+                >
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="px-2 py-0.5 rounded bg-purple-500/20 border border-purple-500/35 text-[10px] font-semibold text-purple-200 truncate">
+                        {room.suggestedGenre}
+                      </span>
+                      <span
+                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-mono font-bold tabular-nums shrink-0 ${
+                          count > 0
+                            ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                            : 'bg-slate-800 text-slate-400 border border-slate-700'
+                        }`}
+                      >
+                        <Users className="w-3 h-3" />
+                        <span>{count}</span>
+                      </span>
+                    </div>
 
-              <button
-                type="button"
-                onClick={() => setShowEmoticons((v) => !v)}
-                className={`p-1.5 rounded transition-colors cursor-pointer ${
-                  showEmoticons
-                    ? 'bg-amber-500/20 text-amber-300'
-                    : 'text-slate-300 hover:bg-slate-800'
-                }`}
-                title="Chèn biểu tượng Yahoo!"
-                aria-label="Chọn mặt cười Yahoo"
-              >
-                <Smile className="w-4 h-4" />
-              </button>
+                    <h4 className="font-display text-sm font-bold text-slate-100 group-hover:text-amber-300 transition-colors">
+                      {room.name}
+                    </h4>
+                    <p className="text-xs text-slate-400 line-clamp-2 leading-relaxed">
+                      {room.topic}
+                    </p>
+                  </div>
 
-              <button
-                type="button"
-                onClick={() => setIsBold((v) => !v)}
-                className={`p-1.5 rounded text-xs cursor-pointer ${
-                  isBold ? 'bg-purple-600 text-white' : 'text-slate-300 hover:bg-slate-800'
-                }`}
-                title="Chữ đậm"
-                aria-label="Chữ đậm"
-              >
-                <Bold className="w-3.5 h-3.5" />
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setIsItalic((v) => !v)}
-                className={`p-1.5 rounded text-xs cursor-pointer ${
-                  isItalic ? 'bg-purple-600 text-white' : 'text-slate-300 hover:bg-slate-800'
-                }`}
-                title="Chữ nghiêng"
-                aria-label="Chữ nghiêng"
-              >
-                <Italic className="w-3.5 h-3.5" />
-              </button>
-
-              <div className="hidden sm:flex items-center gap-1 ml-1 pl-2 border-l border-slate-700">
-                {TEXT_COLORS.map((c) => (
-                  <button
-                    key={c}
-                    type="button"
-                    onClick={() => setTextColor(c)}
-                    style={{ backgroundColor: c }}
-                    className={`w-3.5 h-3.5 rounded-sm transition-transform cursor-pointer ${
-                      textColor === c ? 'ring-2 ring-white scale-110' : 'opacity-75 hover:opacity-100'
-                    }`}
-                    aria-label={`Chọn màu chữ ${c}`}
-                  />
-                ))}
-              </div>
-            </div>
-
-            <button
-              type="button"
-              onClick={handleShareCurrentSong}
-              className="inline-flex items-center gap-1 text-[11px] text-amber-300 hover:text-amber-200 font-medium cursor-pointer whitespace-nowrap"
-            >
-              <MessageSquare className="w-3 h-3" />
-              <span>Gửi bài đang hát</span>
-            </button>
-
-            {showEmoticons && (
-              <div className="absolute bottom-11 left-3 z-20 p-2 rounded-xl bg-[#1A1D2D] border border-slate-700 shadow-2xl grid grid-cols-5 gap-1.5">
-                {YAHOO_EMOTICONS.map((emo) => (
-                  <button
-                    key={emo.code}
-                    type="button"
-                    onClick={() => {
-                      setInputText((prev) => `${prev}${prev ? ' ' : ''}${emo.code} `);
-                      setShowEmoticons(false);
-                    }}
-                    className="flex flex-col items-center justify-center p-1.5 rounded-lg hover:bg-slate-800 transition-colors cursor-pointer"
-                    title={`${emo.label} (${emo.code})`}
-                  >
-                    <span className="text-lg leading-none">{emo.emoji}</span>
-                    <span className="font-mono text-[10px] text-slate-400 mt-1">{emo.code}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
-          <div className="p-2.5 bg-[#11131D] border-t border-slate-800 flex items-center gap-2 shrink-0">
-            <input
-              type="text"
-              value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
-              placeholder={
-                chatMode === 'private'
-                  ? activeDmPeer
-                    ? `Nhắn riêng cho ${activeDmPeer.nickname} (thử :)), =)), <3)...`
-                    : 'Chọn thành viên để bắt đầu chat riêng...'
-                  : `Nhắn vào ${activeRoomObj.name} (thử :)), =)), <3)...`
-              }
-              disabled={chatMode === 'private' && !activeDmPeer}
-              className="flex-1 h-9 px-3 rounded-lg bg-slate-900 border border-slate-700/80 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-purple-500 disabled:opacity-50"
-            />
-            <button
-              type="button"
-              onClick={handleSendMessage}
-              disabled={chatMode === 'private' && !activeDmPeer}
-              className="inline-flex items-center gap-1.5 px-3.5 h-9 rounded-lg bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer"
-            >
-              <Send className="w-3.5 h-3.5" />
-              <span>Gửi</span>
-            </button>
+                  <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between gap-2 text-[11px]">
+                    <div className="min-w-0 flex items-center gap-1.5 text-slate-400 truncate">
+                      {summary?.isPlaying && summary.currentTrackTitle ? (
+                        <>
+                          <Play className="w-3 h-3 text-emerald-400 fill-emerald-400 shrink-0" />
+                          <span className="text-emerald-300 truncate">{summary.currentTrackTitle}</span>
+                        </>
+                      ) : summary?.hostName ? (
+                        <>
+                          <Crown className="w-3 h-3 text-amber-400 shrink-0" />
+                          <span className="truncate">Chủ phòng: {summary.hostName}</span>
+                        </>
+                      ) : (
+                        <>
+                          <Music2 className="w-3 h-3 text-slate-500 shrink-0" />
+                          <span>Sẵn sàng mở nhạc</span>
+                        </>
+                      )}
+                    </div>
+                    <span className="inline-flex items-center gap-1 text-amber-400 font-semibold shrink-0 group-hover:translate-x-0.5 transition-transform">
+                      <span>Vào</span>
+                      <ArrowRight className="w-3 h-3" />
+                    </span>
+                  </div>
+                </button>
+              );
+            })}
           </div>
         </div>
 
-        {/* Right Roster Sidebar (In Public Mode or Mobile Toggle): Trong phòng & Toàn quốc + Chat riêng */}
-        {chatMode === 'public' && (
-          <div
-            className={`${
-              showMembersMobile ? 'absolute inset-y-0 right-0 z-20 flex' : 'hidden sm:flex'
-            } w-52 flex-col bg-[#141724] border-l border-slate-800 shrink-0`}
-          >
-            <div className="p-1.5 border-b border-slate-800 grid grid-cols-2 gap-1">
-              <button
-                type="button"
-                onClick={() => setRosterTab('room')}
-                className={`py-1 px-1.5 rounded text-[11px] font-semibold transition-colors cursor-pointer ${
-                  rosterTab === 'room'
-                    ? 'bg-purple-600 text-white'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
-                }`}
-              >
-                Phòng ({Math.max(1, otherOnlineInRoom.length)})
-              </button>
-              <button
-                type="button"
-                onClick={() => setRosterTab('all')}
-                className={`py-1 px-1.5 rounded text-[11px] font-semibold transition-colors cursor-pointer ${
-                  rosterTab === 'all'
-                    ? 'bg-purple-600 text-white'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
-                }`}
-              >
-                Tất cả ({totalOnlineAllRooms})
-              </button>
+        {/* SECTION 2: 34 New Vietnam Provinces & Cities Rooms */}
+        <div className="pt-4 border-t border-slate-800/80 space-y-3.5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="font-display text-base sm:text-lg font-bold text-sky-300 flex items-center gap-2">
+                <MapPin className="w-5 h-5" />
+                <span>Phòng Giao Lưu 34 Tỉnh Thành Mới Việt Nam</span>
+              </h3>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Cập nhật 34 tỉnh, thành phố trực thuộc TW sau sáp nhập 2025 · Phân chia Bắc · Trung &amp; Tây Nguyên · Nam kèm số người đang tham gia
+              </p>
             </div>
 
-            <div className="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1.5">
-              {rosterTab === 'room' ? (
-                otherOnlineInRoom.length === 0 ? (
-                  <div className="px-2 py-1.5 rounded-md bg-purple-600/15 border border-purple-500/25">
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-xs" aria-hidden="true">
-                        😊
-                      </span>
-                      <span className="text-xs font-bold text-amber-300 truncate">{nickname}</span>
-                    </div>
-                    <p className="text-[10px] text-slate-400 truncate mt-0.5 pl-5">Bạn (Online)</p>
-                  </div>
-                ) : (
-                  otherOnlineInRoom.map((member) => {
-                    const isMe = member.id === userId;
-                    const unread = unreadByPeer[member.id] || 0;
-                    return (
-                      <div
-                        key={member.id}
-                        className={`px-2 py-1.5 rounded-md flex items-center justify-between gap-1.5 ${
-                          isMe
-                            ? 'bg-purple-600/15 border border-purple-500/25'
-                            : 'hover:bg-slate-800/60'
-                        }`}
-                      >
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-xs" aria-hidden="true">
-                              {isMe ? '😊' : '🙂'}
-                            </span>
-                            <span
-                              className={`text-xs truncate ${
-                                isMe ? 'font-bold text-amber-300' : 'font-medium text-slate-200'
-                              }`}
-                            >
-                              {member.nickname}
-                            </span>
-                          </div>
-                          <p className="text-[10px] text-slate-500 truncate mt-0.5 pl-5">
-                            {isMe ? 'Bạn (Online)' : activeRoomObj.shortName}
-                          </p>
-                        </div>
-
-                        {!isMe && (
-                          <button
-                            type="button"
-                            onClick={() => openPrivateChat(member)}
-                            title={`Chat riêng với ${member.nickname}`}
-                            className="p-1.5 rounded bg-purple-600/25 hover:bg-purple-600 text-purple-200 hover:text-white transition-colors shrink-0 cursor-pointer relative"
-                          >
-                            <MessageCircle className="w-3.5 h-3.5" />
-                            {unread > 0 && (
-                              <span className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full bg-rose-500 text-white text-[9px] flex items-center justify-center font-bold">
-                                {unread}
-                              </span>
-                            )}
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })
-                )
-              ) : onlineDirectory.length === 0 ? (
-                <div className="px-2 py-1.5 rounded-md bg-purple-600/15 border border-purple-500/25">
-                  <span className="text-xs font-bold text-amber-300 truncate block">
-                    {nickname}
-                  </span>
-                  <p className="text-[10px] text-slate-400">Bạn (Online)</p>
-                </div>
-              ) : (
-                onlineDirectory.map((member) => {
-                  const isMe = member.id === userId;
-                  const unread = unreadByPeer[member.id] || 0;
-                  return (
-                    <div
-                      key={member.id}
-                      className={`px-2 py-1.5 rounded-md flex items-center justify-between gap-1.5 ${
-                        isMe
-                          ? 'bg-purple-600/15 border border-purple-500/25'
-                          : 'hover:bg-slate-800/60'
-                      }`}
-                    >
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1.5">
-                          <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0" />
-                          <span
-                            className={`text-xs truncate ${
-                              isMe ? 'font-bold text-amber-300' : 'font-medium text-slate-200'
-                            }`}
-                          >
-                            {member.nickname}
-                          </span>
-                        </div>
-                        <p className="text-[10px] text-slate-500 truncate mt-0.5 pl-3.5">
-                          {member.roomName}
-                        </p>
-                      </div>
-
-                      {!isMe && (
-                        <button
-                          type="button"
-                          onClick={() => openPrivateChat({ id: member.id, nickname: member.nickname })}
-                          title={`Chat riêng với ${member.nickname}`}
-                          className="p-1.5 rounded bg-purple-600/25 hover:bg-purple-600 text-purple-200 hover:text-white transition-colors shrink-0 cursor-pointer relative"
-                        >
-                          <MessageCircle className="w-3.5 h-3.5" />
-                          {unread > 0 && (
-                            <span className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full bg-rose-500 text-white text-[9px] flex items-center justify-center font-bold">
-                              {unread}
-                            </span>
-                          )}
-                        </button>
-                      )}
-                    </div>
-                  );
-                })
-              )}
+            <div className="relative w-full sm:w-80">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5 pointer-events-none" />
+              <input
+                type="text"
+                value={provinceSearch}
+                onChange={(e) => setProvinceSearch(e.target.value)}
+                placeholder="Tìm tỉnh mới hoặc tỉnh cũ (vd: TP.HCM, Bình Dương, Đà Nẵng)..."
+                className="w-full h-9 pl-8 pr-3 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-sky-400"
+              />
             </div>
           </div>
-        )}
+
+          {/* Region Filter Tabs */}
+          <div className="flex flex-wrap gap-1.5">
+            {PROVINCE_REGIONS.map((region) => {
+              const countInRegion =
+                region === 'Tất cả 34 tỉnh'
+                  ? VIETNAM_CHAT_ROOMS.filter((r) => r.group !== 'Thể loại nhạc').length
+                  : VIETNAM_CHAT_ROOMS.filter((r) => r.group === region).length;
+              return (
+                <button
+                  key={region}
+                  type="button"
+                  onClick={() => setSelectedRegionTab(region)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer border ${
+                    selectedRegionTab === region
+                      ? 'bg-sky-500 text-slate-950 border-sky-400'
+                      : 'bg-slate-900 text-slate-300 border-slate-800 hover:bg-slate-800'
+                  }`}
+                >
+                  {region} ({countInRegion})
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Province Cards Grid */}
+          {filteredProvinceRooms.length === 0 ? (
+            <p className="text-center text-xs text-slate-400 py-8">
+              Không tìm thấy phòng tỉnh/thành phù hợp với từ khóa &ldquo;{provinceSearch}&rdquo;.
+            </p>
+          ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 gap-2.5 max-h-[420px] overflow-y-auto custom-scrollbar pr-1">
+              {filteredProvinceRooms.map((room) => {
+                const count = roomCounts[room.id] || 0;
+                const summary = roomSummaries[room.id];
+                return (
+                  <button
+                    key={room.id}
+                    type="button"
+                    onClick={() => onSelectRoom(room.id)}
+                    className="group text-left rounded-xl bg-slate-900/65 hover:bg-slate-800/90 border border-slate-800 hover:border-sky-400/50 p-3 flex flex-col justify-between gap-2 transition-all cursor-pointer"
+                  >
+                    <div className="flex items-start justify-between gap-1.5">
+                      <div className="min-w-0">
+                        <p className="text-xs sm:text-sm font-bold text-slate-100 group-hover:text-sky-300 truncate">
+                          {room.shortName}
+                        </p>
+                        <p className="text-[10px] text-slate-400 truncate">{room.group}</p>
+                      </div>
+                      <span
+                        className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-mono font-bold tabular-nums shrink-0 ${
+                          count > 0
+                            ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                            : 'bg-slate-800 text-slate-400'
+                        }`}
+                        title={`${count} người đang tham gia phòng ${room.shortName}`}
+                      >
+                        <Users className="w-2.5 h-2.5" />
+                        <span>{count}</span>
+                      </span>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-1 text-[10px] text-slate-400 pt-1 border-t border-slate-800/70">
+                      <span className="truncate">
+                        {summary?.isPlaying && summary.currentTrackTitle
+                          ? `♪ ${summary.currentTrackTitle}`
+                          : room.suggestedGenre}
+                      </span>
+                      <ArrowRight className="w-3 h-3 text-slate-500 group-hover:text-sky-300 shrink-0" />
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

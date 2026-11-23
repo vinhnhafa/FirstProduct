@@ -53,5 +53,12 @@ export function parseStaticSeoView(
   if (clean === 'nghe-nhac-youtube-mp3' || clean === 'nghe-nhac-khong-quang-cao') return 'music';
   if (clean === 'phong-hat-karaoke-truc-tuyen') return 'rooms';
   if (clean === 'phong-chat-va-game') return 'social';
+  if (clean.startsWith('phong/')) return 'social';
   return null;
+}
+
+export function parseCommunityRoomPath(pathname: string): string | null {
+  const clean = pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
+  const match = clean.match(/^phong\/([a-z0-9-]+)$/);
+  return match ? match[1] : null;
 }

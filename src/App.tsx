@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Spade, Grid3X3 } from 'lucide-react';
+import { Spade, Grid3X3, Radio, Volume2, VolumeX, ArrowDown } from 'lucide-react';
 import { onAuthStateChanged, type User as FirebaseUser } from 'firebase/auth';
 import { auth, syncUserProfileToFirestore } from './lib/firebase';
 import { KARAOKE_SONGS } from './data/songs';
@@ -14,10 +14,16 @@ import {
 } from './types/karaoke';
 import {
   buildSongUrlPath,
+  parseCommunityRoomPath,
   parseMediaUrlPath,
   parseStaticSeoView,
   updateDocumentSeo,
 } from './utils/vietnamese';
+import {
+  getVietnamChatRoom,
+  resolveVietnamChatRoomId,
+  VIETNAM_CHAT_ROOM_MAP,
+} from '../shared/vietnamChatRooms';
 import { useRealtimeSocket } from './hooks/useRealtimeSocket';
 import { Header } from './components/Header';
 import { KaraokePlayer } from './components/KaraokePlayer';
@@ -138,15 +144,26 @@ export default function App() {
     return obj;
   }, []);
 
+  const initialCommunityRoomId = useMemo(() => {
+    if (typeof window === 'undefined') return null;
+    const rid = parseCommunityRoomPath(window.location.pathname);
+    if (!rid) return null;
+    return resolveVietnamChatRoomId(rid);
+  }, []);
+
   const [guestUserId] = useState<string>(getOrCreateUserId);
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [nickname, setNickname] = useState<string>(getInitialNickname);
   const [activeView, setActiveView] = useState<AppView>(() => {
     if (initialRoute?.kind === 'mp3') return 'music';
+    if (initialCommunityRoomId) return 'social';
     if (initialStaticView) return initialStaticView;
     return 'stage';
   });
+  const [selectedCommunityRoomId, setSelectedCommunityRoomId] = useState<string | null>(
+    initialCommunityRoomId
+  );
   const [initialMp3YoutubeId] = useState<string | null>(() =>
     initialRoute?.kind === 'mp3' ? initialRoute.youtubeId : null
   );
@@ -170,6 +187,7 @@ export default function App() {
   const [queue, setQueue] = useState<QueueItem[]>(loadInitialQueue);
   const [blockedIds, setBlockedIds] = useState<string[]>(loadInitialBlockedIds);
   const [isTvMode, setIsTvMode] = useState(false);
+  const [localRoomMuted, setLocalRoomMuted] = useState(false);
   const [activeGame, setActiveGame] = useState<'tien-len' | 'caro'>('tien-len');
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [sharedToChat, setSharedToChat] = useState<{ song: Song; seq: number } | null>(null);
@@ -387,10 +405,19 @@ export default function App() {
     }
 
     if (!isTvMode && activeView === 'social') {
+      if (selectedCommunityRoomId && VIETNAM_CHAT_ROOM_MAP.has(selectedCommunityRoomId)) {
+        const roomDef = getVietnamChatRoom(selectedCommunityRoomId);
+        updateDocumentSeo({
+          title: `${roomDef.name} (${roomDef.group}) — Nghe Nhạc & Chat Online | Karaoke Online`,
+          description: `${roomDef.topic}. Tham gia ${roomDef.name} để chat chung, chat riêng 1-1 và nghe nhạc ${roomDef.suggestedGenre} không quảng cáo cùng mọi người.`,
+          path: `/phong/${roomDef.id}`,
+        });
+        return;
+      }
       updateDocumentSeo({
-        title: 'Phòng Chat Yahoo & Sảnh Game Tiến Lên, Cờ Caro | Karaoke Online',
+        title: 'Phòng Thể Loại Nhạc, Chat 34 Tỉnh Thành Mới & Sảnh Game | Karaoke Online',
         description:
-          'Vừa hát karaoke không quảng cáo vừa nghe nhạc YouTube MP3, chat phòng Yahoo hoài niệm và chơi Tiến Lên, Cờ Caro nhiều người chơi thực tế.',
+          'Vào trang riêng từng phòng thể loại nhạc & 34 tỉnh thành mới Việt Nam, chat chung, chat riêng 1-1 và chơi Tiến Lên, Cờ Caro trực tuyến.',
         path: '/phong-chat-va-game',
       });
       return;
@@ -406,6 +433,7 @@ export default function App() {
   }, [
     activeView,
     isTvMode,
+    selectedCommunityRoomId,
     currentSong.title,
     currentSong.artist,
     currentSong.genre,
@@ -572,30 +600,79 @@ export default function App() {
     [addToast]
   );
 
-  const handlePlaySharedFromChat = useCallback(
-    (youtubeId: string, title: string, artist: string) => {
-      const existing = KARAOKE_SONGS.find((s) => s.youtubeId === youtubeId);
-      if (existing) {
-        handlePlayNow(existing);
-      } else {
-        handlePlayNow({
-          id: `shared-${youtubeId}-${Date.now()}`,
-          youtubeId,
-          title,
-          artist,
-          genre: 'Nhạc Trẻ',
-          durationSeconds: 240,
-          lyrics: ['Đang phát bài hát được chia sẻ từ phòng chat Yahoo!'],
-        });
+  const handleParallelKaraokeFromRoom = useCallback(
+    async (youtubeId: string, rawTitle: string, artist: string) => {
+      const roomName = selectedCommunityRoomId
+        ? getVietnamChatRoom(selectedCommunityRoomId).shortName
+        : 'Phòng nhạc';
+
+      const cleanTitle =
+        rawTitle
+          .replace(/\b(official|mv|music video|audio|lyrics?|nhạc trẻ|bolero|hay nhất|liên khúc|lk)\b/gi, ' ')
+          .split(/[-|([♫]/)[0]
+          .replace(/\s+/g, ' ')
+          .trim() || rawTitle;
+
+      setActiveView('stage');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      addToast(
+        `Đang mở Karaoke song song cho riêng bạn — ${roomName} vẫn phát nhạc bình thường!`,
+        'success'
+      );
+
+      // Try finding an actual Karaoke beat matching the room's song without pausing or leaving the room
+      const localMatch = visibleCatalog.find((s) =>
+        s.title.toLowerCase().includes(cleanTitle.toLowerCase())
+      );
+      if (localMatch) {
+        setCurrentSong(localMatch);
+        return;
       }
+
+      try {
+        const res = await fetch(
+          `/api/youtube/search?q=${encodeURIComponent(cleanTitle)}&karaokeOnly=true`
+        );
+        const data = (await res.json()) as { items?: Song[] };
+        const ytMatch = Array.isArray(data.items)
+          ? data.items.find((s) => !blockedSet.has(s.youtubeId))
+          : undefined;
+        if (ytMatch) {
+          setCurrentSong(ytMatch);
+          return;
+        }
+      } catch {
+        // Fallback cleanly to current track below
+      }
+
+      setCurrentSong({
+        id: `kara-room-${youtubeId}-${Date.now()}`,
+        youtubeId,
+        title: rawTitle,
+        artist,
+        genre: 'Nhạc Trẻ',
+        durationSeconds: 240,
+        isKaraoke: true,
+        lyrics: [`Đang mở Sân Khấu Karaoke song song với bài "${rawTitle}".`],
+      });
     },
-    [handlePlayNow]
+    [selectedCommunityRoomId, addToast, visibleCatalog, blockedSet]
   );
 
   const handleOpenRoomWithSong = useCallback((song: Song) => {
     setRoomCreateSong(song);
     setActiveView('rooms');
     window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, []);
+
+  const handleSelectCommunityRoom = useCallback((roomId: string | null) => {
+    setSelectedCommunityRoomId(roomId);
+    if (!roomId) {
+      setLocalRoomMuted(false);
+    } else {
+      setActiveView('social');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
   }, []);
 
   const handleReportBrokenVideo = useCallback(
@@ -681,6 +758,67 @@ export default function App() {
       />
 
       <main className="flex-1 w-full max-w-[1600px] mx-auto px-4 sm:px-6 py-5 sm:py-6 space-y-8">
+        {/* Parallel Room Status Strip when user is in a room AND opens Karaoke / Browse / Music */}
+        {!isTvMode && selectedCommunityRoomId && activeView !== 'social' && (
+          <div className="rounded-xl border border-emerald-500/40 bg-emerald-950/35 px-4 py-2.5 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+              <div className="min-w-0">
+                <p className="text-xs sm:text-sm font-semibold text-emerald-200 truncate">
+                  Đang chạy song song với {getVietnamChatRoom(selectedCommunityRoomId).name}
+                </p>
+                <p className="text-[11px] text-emerald-300/80 truncate">
+                  Phòng vẫn phát nhạc bình thường cho mọi thành viên — chỉ riêng bạn đang mở Karaoke
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setLocalRoomMuted((m) => !m)}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border cursor-pointer transition-colors ${
+                  localRoomMuted
+                    ? 'bg-amber-500 text-slate-950 border-amber-400'
+                    : 'bg-slate-900/90 hover:bg-slate-800 text-slate-100 border-slate-700'
+                }`}
+              >
+                {localRoomMuted ? (
+                  <>
+                    <Volume2 className="w-3.5 h-3.5" />
+                    <span>Bật lại tiếng phòng (máy bạn)</span>
+                  </>
+                ) : (
+                  <>
+                    <VolumeX className="w-3.5 h-3.5 text-rose-400" />
+                    <span>Tắt tiếng phòng (chỉ máy bạn)</span>
+                  </>
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const targetEl = document.getElementById('community-room-page');
+                  if (activeView === 'stage' && targetEl) {
+                    targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                  } else {
+                    setActiveView('social');
+                  }
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold cursor-pointer"
+              >
+                {activeView === 'stage' ? (
+                  <ArrowDown className="w-3.5 h-3.5" />
+                ) : (
+                  <Radio className="w-3.5 h-3.5" />
+                )}
+                <span>{activeView === 'stage' ? 'Xuống phòng bên dưới' : 'Về trang phòng'}</span>
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* VIEW 1: Dedicated Browse & Filter All Karaoke Music Page */}
         {!isTvMode && activeView === 'browse' && (
           <BrowseCatalogPage
@@ -764,89 +902,94 @@ export default function App() {
           />
         )}
 
-        {/* VIEW 4 (or shown below Stage): Yahoo! Messenger Chat Rooms & Games */}
-        {!isTvMode && (activeView === 'social' || activeView === 'stage') && (
-          <section className="pt-4 border-t border-slate-800/80 space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h2 className="font-display text-xl sm:text-2xl font-bold text-slate-50">
-                  Phòng Chat Yahoo & Sảnh Game Giải Trí
-                </h2>
-                <p className="text-sm text-slate-400 mt-0.5">
-                  Vừa nghêu ngao hát Karaoke vừa tám chuyện cùng bạn bè hoặc làm ván Tiến Lên, Cờ Caro
-                </p>
+        {/* VIEW 5: Music Genre & 34 New Province Rooms FIRST, then Games BELOW (kept mounted while joined in room so music runs in parallel!) */}
+        {!isTvMode && (activeView === 'social' || activeView === 'stage' || Boolean(selectedCommunityRoomId)) && (
+          <section
+            className={
+              activeView === 'social' || activeView === 'stage'
+                ? 'pt-4 border-t border-slate-800/80 space-y-8'
+                : 'fixed -left-[9999px] top-0 w-[640px] h-[360px] overflow-hidden opacity-0 pointer-events-none'
+            }
+          >
+            <YahooChat
+              userId={userId}
+              nickname={effectiveNickname}
+              onNicknameChange={handleNicknameChange}
+              selectedRoomId={selectedCommunityRoomId}
+              onSelectRoom={handleSelectCommunityRoom}
+              currentSong={currentSong}
+              incomingSharedSong={sharedToChat}
+              connected={connected}
+              sendEvent={sendEvent}
+              subscribe={subscribe}
+              onParallelKaraoke={handleParallelKaraokeFromRoom}
+              isParallelKaraokeActive={activeView === 'stage' && Boolean(selectedCommunityRoomId)}
+              localRoomMuted={localRoomMuted}
+              onSetLocalRoomMuted={setLocalRoomMuted}
+              onToast={addToast}
+            />
+
+            {/* Game Lobby positioned cleanly BELOW Chat Rooms */}
+            <div id="games-section" className="pt-6 border-t border-slate-800/80 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="font-display text-xl sm:text-2xl font-bold text-slate-50">
+                    Sảnh Game Giải Trí
+                  </h2>
+                  <p className="text-sm text-slate-400 mt-0.5">
+                    Rủ bạn bè trong phòng chat xuống giao lưu Tiến Lên Miền Nam hoặc Cờ Caro trực tuyến
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-900 border border-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => setActiveGame('tien-len')}
+                    className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                      activeGame === 'tien-len'
+                        ? 'bg-emerald-600 text-white'
+                        : 'text-slate-300 hover:text-white hover:bg-slate-800'
+                    }`}
+                  >
+                    <Spade className="w-4 h-4" />
+                    <span>Bài Tiến Lên</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveGame('caro')}
+                    className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                      activeGame === 'caro'
+                        ? 'bg-amber-500 text-slate-950'
+                        : 'text-slate-300 hover:text-white hover:bg-slate-800'
+                    }`}
+                  >
+                    <Grid3X3 className="w-4 h-4" />
+                    <span>Cờ Caro</span>
+                  </button>
+                </div>
               </div>
 
-              <div
-                id="games-section"
-                className="flex items-center gap-1 p-1 rounded-xl bg-slate-900 border border-slate-800"
-              >
-                <button
-                  type="button"
-                  onClick={() => setActiveGame('tien-len')}
-                  className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap cursor-pointer ${
-                    activeGame === 'tien-len'
-                      ? 'bg-emerald-600 text-white'
-                      : 'text-slate-300 hover:text-white hover:bg-slate-800'
-                  }`}
-                >
-                  <Spade className="w-4 h-4" />
-                  <span>Bài Tiến Lên</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveGame('caro')}
-                  className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap cursor-pointer ${
-                    activeGame === 'caro'
-                      ? 'bg-amber-500 text-slate-950'
-                      : 'text-slate-300 hover:text-white hover:bg-slate-800'
-                  }`}
-                >
-                  <Grid3X3 className="w-4 h-4" />
-                  <span>Cờ Caro</span>
-                </button>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
-              <div className="lg:col-span-5">
-                <YahooChat
+              {activeGame === 'tien-len' ? (
+                <TienLenGame
                   userId={userId}
-                  nickname={effectiveNickname}
-                  onNicknameChange={handleNicknameChange}
-                  currentSong={currentSong}
-                  incomingSharedSong={sharedToChat}
+                  userName={effectiveNickname}
+                  rooms={gameRooms}
                   connected={connected}
                   sendEvent={sendEvent}
                   subscribe={subscribe}
-                  onPlaySharedSong={handlePlaySharedFromChat}
                   onToast={addToast}
                 />
-              </div>
-
-              <div className="lg:col-span-7">
-                {activeGame === 'tien-len' ? (
-                  <TienLenGame
-                    userId={userId}
-                    userName={effectiveNickname}
-                    rooms={gameRooms}
-                    connected={connected}
-                    sendEvent={sendEvent}
-                    subscribe={subscribe}
-                    onToast={addToast}
-                  />
-                ) : (
-                  <CaroGame
-                    userId={userId}
-                    userName={effectiveNickname}
-                    rooms={gameRooms}
-                    connected={connected}
-                    sendEvent={sendEvent}
-                    subscribe={subscribe}
-                    onToast={addToast}
-                  />
-                )}
-              </div>
+              ) : (
+                <CaroGame
+                  userId={userId}
+                  userName={effectiveNickname}
+                  rooms={gameRooms}
+                  connected={connected}
+                  sendEvent={sendEvent}
+                  subscribe={subscribe}
+                  onToast={addToast}
+                />
+              )}
             </div>
           </section>
         )}

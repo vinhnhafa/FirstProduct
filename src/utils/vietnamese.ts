@@ -4,6 +4,7 @@ import {
   buildSongUrlPath,
   parseMediaUrlPath,
   parseStaticSeoView,
+  parseCommunityRoomPath,
 } from '../../shared/seoSlug';
 
 export {
@@ -12,6 +13,7 @@ export {
   buildSongUrlPath,
   parseMediaUrlPath,
   parseStaticSeoView,
+  parseCommunityRoomPath,
 };
 
 export function extractYouTubeId(input: string): string | null {
