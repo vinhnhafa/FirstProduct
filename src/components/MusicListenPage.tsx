@@ -25,6 +25,9 @@ import {
   Share2,
   Youtube,
   Smartphone,
+  Lock,
+  Unlock,
+  ArrowUp,
 } from 'lucide-react';
 import { ListeningHistoryItem, MusicTrack } from '../types/karaoke';
 import { MUSIC_GENRES, STARTER_MUSIC_TRACKS } from '../data/musicCatalog';
@@ -133,6 +136,7 @@ export function MusicListenPage({
   });
   const [repeatOne, setRepeatOne] = useState(false);
   const [expandVideo, setExpandVideo] = useState(false);
+  const [touchLock, setTouchLock] = useState(true);
   const [wakeLockActive, setWakeLockActive] = useState(false);
 
   // Listening History & Favorites
@@ -160,6 +164,7 @@ export function MusicListenPage({
     unMute: () => void;
     getCurrentTime: () => number;
     getDuration: () => number;
+    getIframe?: () => HTMLIFrameElement | null;
     destroy: () => void;
   } | null>(null);
   const ytReadyRef = useRef(false);
@@ -202,13 +207,13 @@ export function MusicListenPage({
     };
   }, [initialYoutubeId]);
 
-  // Sync MP3 SEO title, meta description (with "mp3"), and song-name-before-id URL
+  // Sync MP3 SEO title, meta description (with "nghe nhạc youtube mp3" & "nghe nhạc không quảng cáo"), and song-name-before-id URL
   useEffect(() => {
     const cleanTitle = currentTrack.title;
     const displayTitle = cleanTitle.toLowerCase().includes('mp3')
-      ? `${cleanTitle} | Điệp Khúc Online`
-      : `${cleanTitle} MP3 | Điệp Khúc Online`;
-    const description = `Nghe nhạc mp3 trực tuyến ${cleanTitle} - ${currentTrack.artist} (${currentTrack.genre}). Lưu lịch sử bài hát đã nghe và hỗ trợ nghe nhạc nền khi tắt màn hình điện thoại.`;
+      ? `${cleanTitle} — Nghe Nhạc YouTube MP3 | Karaoke Online`
+      : `${cleanTitle} MP3 — Nghe Nhạc YouTube MP3 | Karaoke Online`;
+    const description = `Nghe nhạc YouTube MP3 trực tuyến bài ${cleanTitle} - ${currentTrack.artist} (${currentTrack.genre}). Trải nghiệm nghe nhạc không quảng cáo pop-up ngay trong trình duyệt điện thoại, lưu lịch sử và nghe tắt màn hình.`;
     const path = buildSongUrlPath(cleanTitle, currentTrack.youtubeId, 'mp3');
     updateDocumentSeo({ title: displayTitle, description, path });
   }, [currentTrack.title, currentTrack.artist, currentTrack.genre, currentTrack.youtubeId]);
@@ -438,23 +443,35 @@ export function MusicListenPage({
       ytHostRef.current.innerHTML = '';
       ytHostRef.current.appendChild(target);
 
-      ytPlayerRef.current = new window.YT.Player(target, {
+      ytPlayerRef.current = new (window.YT.Player as unknown as new (el: HTMLElement, opts: Record<string, unknown>) => typeof ytPlayerRef.current)(target, {
+        host: 'https://www.youtube-nocookie.com',
         videoId: currentTrackRef.current.youtubeId,
         playerVars: {
           autoplay: 0,
+          controls: 0,
+          fs: 0,
           rel: 0,
           modestbranding: 1,
+          iv_load_policy: 3,
           playsinline: 1,
+          disablekb: 1,
+          origin: window.location.origin,
         },
         events: {
-          onReady: (e) => {
+          onReady: (e: { target: NonNullable<typeof ytPlayerRef.current> }) => {
             if (!mounted) return;
+            const iframe = e.target.getIframe?.();
+            if (iframe) {
+              iframe.setAttribute('playsinline', '1');
+              iframe.setAttribute('webkit-playsinline', '1');
+              iframe.setAttribute('allow', 'autoplay; encrypted-media; picture-in-picture');
+            }
             ytReadyRef.current = true;
             e.target.setVolume(volume);
             const d = e.target.getDuration?.();
             if (d && d > 0) setDuration(d);
           },
-          onStateChange: (e) => {
+          onStateChange: (e: { data: number; target: NonNullable<typeof ytPlayerRef.current> }) => {
             if (!mounted) return;
             if (e.data === 1) {
               wantPlayingRef.current = true;
@@ -608,7 +625,7 @@ export function MusicListenPage({
     syncMediaSession({
       title: currentTrack.title,
       artist: currentTrack.artist,
-      album: `${currentTrack.genre} · Điệp Khúc Online MP3`,
+      album: `${currentTrack.genre} · Karaoke Online MP3`,
       youtubeId: currentTrack.youtubeId,
       isPlaying,
       durationSeconds: duration,
@@ -909,26 +926,72 @@ export function MusicListenPage({
                 </div>
               </div>
 
-              <button
-                type="button"
-                onClick={() => setExpandVideo((v) => !v)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 shrink-0 cursor-pointer"
-              >
-                <Video className="w-3.5 h-3.5 text-purple-400" />
-                <span>{expandVideo ? 'Thu gọn Video' : 'Xem Video lớn'}</span>
-              </button>
+              <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTouchLock((v) => !v);
+                    onToast(
+                      touchLock
+                        ? 'Đã mở khóa chạm khung video gốc.'
+                        : 'Đã bật chế độ khóa trong trình duyệt (không nhảy sang app YouTube).',
+                      'info'
+                    );
+                  }}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold cursor-pointer ${
+                    touchLock
+                      ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
+                      : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'
+                  }`}
+                >
+                  {touchLock ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
+                  <span>{touchLock ? 'Giữ trong web' : 'Chạm YT gốc'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setExpandVideo((v) => !v)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 cursor-pointer"
+                >
+                  <Video className="w-3.5 h-3.5 text-purple-400" />
+                  <span>{expandVideo ? 'Thu gọn Video' : 'Xem Video lớn'}</span>
+                </button>
+              </div>
             </div>
 
-            {/* Embedded YouTube Player (kept visible so browser never blocks/throttles YT audio) */}
+            {/* Embedded YouTube Player (inline inside web browser with anti-app-jump shield) */}
             <div className="bg-black/95 border-b border-slate-800/80 flex justify-center">
               <div
-                className={
+                className={`relative ${
                   expandVideo
                     ? 'w-full aspect-video'
                     : 'w-full max-w-md aspect-video sm:h-40 sm:w-72 my-2 rounded-xl overflow-hidden border border-slate-800'
-                }
+                }`}
               >
                 <div ref={ytHostRef} className="w-full h-full" />
+
+                {touchLock && (
+                  <div
+                    onClick={handleTogglePlay}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        handleTogglePlay();
+                      }
+                    }}
+                    aria-label={isPlaying ? 'Tạm dừng nhạc' : 'Phát nhạc ngay trong trình duyệt'}
+                    className="absolute inset-0 z-10 touch-pan-y cursor-pointer flex items-center justify-center group"
+                  >
+                    {!isPlaying && (
+                      <div className="px-3.5 py-2 rounded-xl bg-black/75 border border-purple-500/50 text-purple-200 backdrop-blur-md flex items-center gap-2 text-xs font-semibold shadow-lg group-hover:bg-black/90">
+                        <Play className="w-3.5 h-3.5 fill-purple-400 text-purple-400" />
+                        <span>Phát ngay trong trang web</span>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
 
@@ -1048,7 +1111,7 @@ export function MusicListenPage({
                       currentTrack.youtubeId,
                       'mp3'
                     )}`;
-                    const shareText = `Đang nghe "${currentTrack.title}" MP3 trên Điệp Khúc Online: ${songUrl}`;
+                    const shareText = `Đang nghe "${currentTrack.title}" MP3 trên Karaoke Online: ${songUrl}`;
                     navigator.clipboard?.writeText(shareText).catch(() => {});
                     onToast('Đã sao chép link bài hát MP3 để chia sẻ!', 'success');
                   }}
@@ -1608,6 +1671,54 @@ export function MusicListenPage({
             )}
           </div>
         </aside>
+      </div>
+
+      {/* Mobile Sticky Mini-Player Bar: Keep reading & interacting while listening on mobile */}
+      <div className="lg:hidden sticky bottom-3 z-30 rounded-2xl bg-[#131726]/95 backdrop-blur-xl border border-purple-500/40 shadow-2xl px-3.5 py-2.5 flex items-center justify-between gap-3">
+        <button
+          type="button"
+          onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+          className="flex items-center gap-2.5 min-w-0 flex-1 text-left cursor-pointer"
+        >
+          <img
+            src={`https://i.ytimg.com/vi/${currentTrack.youtubeId}/default.jpg`}
+            alt={currentTrack.title}
+            className="w-10 h-10 rounded-lg object-cover shrink-0 border border-purple-500/40"
+          />
+          <div className="min-w-0">
+            <p className="text-xs font-bold text-slate-100 truncate">{currentTrack.title}</p>
+            <p className="text-[11px] text-purple-300 truncate">
+              {currentTrack.genre} · {formatTime(currentTime)} / {formatTime(duration)}
+            </p>
+          </div>
+        </button>
+
+        <div className="flex items-center gap-1.5 shrink-0">
+          <button
+            type="button"
+            onClick={handleTogglePlay}
+            className="w-9 h-9 rounded-full bg-purple-600 hover:bg-purple-500 flex items-center justify-center text-white cursor-pointer"
+            aria-label={isPlaying ? 'Tạm dừng' : 'Phát nhạc'}
+          >
+            {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 fill-white ml-0.5" />}
+          </button>
+          <button
+            type="button"
+            onClick={handleNextTrack}
+            className="w-9 h-9 rounded-full bg-slate-800 hover:bg-slate-700 flex items-center justify-center text-slate-200 cursor-pointer"
+            aria-label="Bài tiếp theo"
+          >
+            <SkipForward className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+            className="w-9 h-9 rounded-full bg-slate-800 hover:bg-slate-700 flex items-center justify-center text-amber-300 cursor-pointer"
+            aria-label="Cuộn lên trình phát"
+          >
+            <ArrowUp className="w-4 h-4" />
+          </button>
+        </div>
       </div>
     </div>
   );

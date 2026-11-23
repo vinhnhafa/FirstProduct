@@ -189,7 +189,7 @@ export function Header({
             <Mic2 className="w-5 h-5 mic-glow" />
           </span>
           <span className="font-display text-lg sm:text-xl font-bold tracking-tight text-slate-50">
-            Điệp Khúc <span className="text-amber-400">Online</span>
+            Karaoke <span className="text-amber-400">Online</span>
           </span>
         </button>
 
@@ -298,7 +298,7 @@ export function Header({
                   {combinedResults.slice(0, 12).map((song) => (
                     <div
                       key={song.id}
-                      className="px-4 py-2.5 flex items-center justify-between gap-3 hover:bg-slate-800/60 transition-colors"
+                      className="px-4 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 sm:gap-3 hover:bg-slate-800/60 transition-colors"
                     >
                       <button
                         type="button"
@@ -309,7 +309,7 @@ export function Header({
                         }}
                         className="text-left min-w-0 flex-1 cursor-pointer"
                       >
-                        <p className="text-sm font-semibold text-slate-100 truncate">
+                        <p className="text-sm font-semibold text-slate-100 line-clamp-2 sm:truncate">
                           {song.title}
                         </p>
                         <p className="text-xs text-slate-400 truncate mt-0.5">
@@ -317,7 +317,7 @@ export function Header({
                           {song.viewCountText ? ` · ${song.viewCountText}` : ''}
                         </p>
                       </button>
-                      <div className="flex items-center gap-1.5 shrink-0">
+                      <div className="flex items-center justify-end gap-1.5 shrink-0">
                         <button
                           type="button"
                           onClick={() => {

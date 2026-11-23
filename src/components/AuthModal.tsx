@@ -144,7 +144,7 @@ export function AuthModal({
         <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between">
           <div>
             <h2 id="auth-modal-title" className="font-display text-lg font-bold text-slate-50">
-              {firebaseUser ? 'Tài Khoản Điệp Khúc Online' : 'Đăng Nhập Tài Khoản'}
+              {firebaseUser ? 'Tài Khoản Karaoke Online' : 'Đăng Nhập Tài Khoản'}
             </h2>
             <p className="text-xs text-slate-400 mt-0.5">
               Đồng bộ ví Tim, lịch sử hát và phòng chơi trên mọi thiết bị

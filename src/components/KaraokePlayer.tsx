@@ -8,11 +8,12 @@ import {
   VolumeX,
   FileText,
   Share2,
-  ExternalLink,
+  Lock,
+  Unlock,
   Music2,
 } from 'lucide-react';
 import { Song } from '../types/karaoke';
-import { formatTime } from '../utils/vietnamese';
+import { buildSongUrlPath, formatTime } from '../utils/vietnamese';
 import {
   startBackgroundAudioKeepAlive,
   stopBackgroundAudioKeepAlive,
@@ -25,6 +26,7 @@ declare global {
       Player: new (
         element: HTMLElement | string,
         options: {
+          host?: string;
           videoId?: string;
           playerVars?: Record<string, string | number>;
           events?: {
@@ -59,6 +61,7 @@ interface YTPlayer {
   getCurrentTime: () => number;
   getDuration: () => number;
   getPlayerState: () => number;
+  getIframe?: () => HTMLIFrameElement | null;
   destroy: () => void;
 }
 
@@ -136,6 +139,7 @@ export function KaraokePlayer({
   const [duration, setDuration] = useState(currentSong.durationSeconds || 240);
   const [showLyrics, setShowLyrics] = useState(true);
   const [lyricsSize, setLyricsSize] = useState<'md' | 'lg' | 'xl'>('lg');
+  const [touchLock, setTouchLock] = useState(true);
   const [playerError, setPlayerError] = useState<string | null>(null);
 
   const loadedVideoIdRef = useRef<string>(currentSong.youtubeId);
@@ -148,7 +152,7 @@ export function KaraokePlayer({
     currentTimeRef.current = currentTime;
   }, [currentTime]);
 
-  // Initialize YouTube IFrame Player once
+  // Initialize YouTube IFrame Player once (privacy-enhanced inline embed, no external app jump)
   useEffect(() => {
     let active = true;
 
@@ -162,17 +166,28 @@ export function KaraokePlayer({
       playerHostRef.current.appendChild(targetEl);
 
       playerRef.current = new window.YT.Player(targetEl, {
+        host: 'https://www.youtube-nocookie.com',
         videoId: loadedVideoIdRef.current,
         playerVars: {
           autoplay: 1,
+          controls: 0,
+          fs: 0,
           rel: 0,
           modestbranding: 1,
           iv_load_policy: 3,
           playsinline: 1,
+          disablekb: 1,
+          origin: window.location.origin,
         },
         events: {
           onReady: (event) => {
             if (!active) return;
+            const iframe = event.target.getIframe?.();
+            if (iframe) {
+              iframe.setAttribute('playsinline', '1');
+              iframe.setAttribute('webkit-playsinline', '1');
+              iframe.setAttribute('allow', 'autoplay; encrypted-media; picture-in-picture');
+            }
             setIsReady(true);
             setPlayerError(null);
             event.target.setVolume(volume);
@@ -351,7 +366,7 @@ export function KaraokePlayer({
     syncMediaSession({
       title: currentSong.title,
       artist: currentSong.artist,
-      album: `${currentSong.genre} · Karaoke Điệp Khúc Online`,
+      album: `${currentSong.genre} · Karaoke Online`,
       youtubeId: currentSong.youtubeId,
       isPlaying,
       durationSeconds: duration,
@@ -436,7 +451,29 @@ export function KaraokePlayer({
           <p className="text-sm text-slate-400 truncate">{currentSong.artist}</p>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-2 shrink-0 flex-wrap">
+          <button
+            type="button"
+            onClick={() => {
+              setTouchLock((v) => !v);
+              onToast(
+                touchLock
+                  ? 'Đã mở khóa chạm trực tiếp vào video YouTube.'
+                  : 'Đã bật khóa chống nhảy sang app YouTube trên điện thoại.',
+                'info'
+              );
+            }}
+            className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
+              touchLock
+                ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
+                : 'bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800'
+            }`}
+            title="Giữ phát ngay trong trình duyệt điện thoại, không nhảy sang app YouTube"
+          >
+            {touchLock ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
+            <span className="hidden sm:inline">{touchLock ? 'Giữ trong web' : 'Chạm YT gốc'}</span>
+          </button>
+
           <button
             type="button"
             onClick={() => onShareToChat(currentSong)}
@@ -445,39 +482,61 @@ export function KaraokePlayer({
             <Share2 className="w-3.5 h-3.5 text-amber-400" />
             <span>Mời phòng chat</span>
           </button>
-          <a
-            href={`https://www.youtube.com/watch?v=${currentSong.youtubeId}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-medium transition-colors whitespace-nowrap"
+
+          <button
+            type="button"
+            onClick={() => {
+              const url = `${window.location.origin}${buildSongUrlPath(
+                currentSong.title,
+                currentSong.youtubeId,
+                'karaoke'
+              )}`;
+              navigator.clipboard?.writeText(url).catch(() => {});
+              onToast('Đã sao chép link hát Karaoke chuẩn SEO!', 'success');
+            }}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-medium transition-colors whitespace-nowrap cursor-pointer"
           >
-            <ExternalLink className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">YouTube</span>
-          </a>
+            <span>Chép link</span>
+          </button>
         </div>
       </div>
 
-      {/* 16:9 YouTube IFrame Video Stage */}
+      {/* 16:9 Inline YouTube IFrame Video Stage (with mobile anti-app-jump touch shield) */}
       <div className="relative w-full aspect-video rounded-2xl overflow-hidden bg-[#050609] border border-slate-800/90 shadow-2xl">
         <div ref={playerHostRef} className="w-full h-full" />
 
+        {touchLock && !playerError && (
+          <div
+            onClick={handleTogglePlay}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                handleTogglePlay();
+              }
+            }}
+            aria-label={isPlaying ? 'Tạm dừng video Karaoke' : 'Phát video Karaoke ngay trong trang'}
+            className="absolute inset-0 z-10 touch-pan-y cursor-pointer flex items-center justify-center group"
+          >
+            {!isPlaying && (
+              <div className="px-4 py-2.5 rounded-xl bg-black/75 border border-amber-500/50 text-amber-300 backdrop-blur-md flex items-center gap-2 text-xs sm:text-sm font-semibold shadow-xl group-hover:bg-black/90 transition-colors">
+                <Play className="w-4 h-4 fill-amber-400 text-amber-400" />
+                <span>Chạm để Hát Karaoke ngay trong trình duyệt</span>
+              </div>
+            )}
+          </div>
+        )}
+
         {playerError && (
-          <div className="absolute inset-0 bg-slate-950/92 flex flex-col items-center justify-center p-6 text-center gap-4">
+          <div className="absolute inset-0 z-20 bg-slate-950/92 flex flex-col items-center justify-center p-6 text-center gap-4">
             <p className="text-sm sm:text-base text-slate-200 max-w-md">{playerError}</p>
             <div className="flex items-center gap-3">
-              <a
-                href={`https://www.youtube.com/watch?v=${currentSong.youtubeId}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="px-4 py-2 rounded-lg bg-amber-500 text-slate-950 font-semibold text-sm hover:bg-amber-400 transition-colors"
-              >
-                Mở trên YouTube
-              </a>
               {hasNext && (
                 <button
                   type="button"
                   onClick={onNext}
-                  className="px-4 py-2 rounded-lg bg-slate-800 text-slate-100 font-medium text-sm hover:bg-slate-700 transition-colors cursor-pointer"
+                  className="px-4 py-2 rounded-lg bg-amber-500 text-slate-950 font-semibold text-sm hover:bg-amber-400 transition-colors cursor-pointer"
                 >
                   Qua bài kế tiếp
                 </button>

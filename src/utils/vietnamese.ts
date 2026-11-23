@@ -75,6 +75,17 @@ export function parseMediaUrlPath(
   return { youtubeId, kind, rawSlug };
 }
 
+export function parseStaticSeoView(
+  pathname: string
+): 'browse' | 'music' | 'rooms' | 'social' | null {
+  const clean = pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
+  if (clean === 'hat-karaoke-khong-quang-cao') return 'browse';
+  if (clean === 'nghe-nhac-youtube-mp3' || clean === 'nghe-nhac-khong-quang-cao') return 'music';
+  if (clean === 'phong-hat-karaoke-truc-tuyen') return 'rooms';
+  if (clean === 'phong-chat-va-game') return 'social';
+  return null;
+}
+
 export function updateDocumentSeo(opts: {
   title: string;
   description: string;
@@ -90,15 +101,25 @@ export function updateDocumentSeo(opts: {
   setMeta('meta[name="description"]', opts.description);
   setMeta('meta[property="og:title"]', opts.title);
   setMeta('meta[property="og:description"]', opts.description);
+  setMeta('meta[name="twitter:title"]', opts.title);
+  setMeta('meta[name="twitter:description"]', opts.description);
 
   if (opts.path && typeof window !== 'undefined') {
     try {
-      if (window.location.search.includes('momoReturn=')) {
-        return;
+      if (!window.location.search.includes('momoReturn=')) {
+        if (window.location.pathname !== opts.path) {
+          window.history.replaceState(null, '', opts.path);
+        }
       }
-      if (window.location.pathname !== opts.path) {
-        window.history.replaceState(null, '', opts.path);
+      const fullCanonical = `${window.location.origin}${opts.path}`;
+      let canonicalEl = document.querySelector('link[rel="canonical"]');
+      if (!canonicalEl) {
+        canonicalEl = document.createElement('link');
+        canonicalEl.setAttribute('rel', 'canonical');
+        document.head.appendChild(canonicalEl);
       }
+      canonicalEl.setAttribute('href', fullCanonical);
+      setMeta('meta[property="og:url"]', fullCanonical);
     } catch {
       // Ignore restricted history frames
     }

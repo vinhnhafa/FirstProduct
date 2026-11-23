@@ -1409,7 +1409,7 @@ async function bootstrap() {
     const orderId = `DKO_${Date.now()}_${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
     const requestId = `REQ_${orderId}`;
     const amount = String(pack.priceVnd);
-    const orderInfo = `Diep Khuc Online - Nap ${pack.hearts} Tim`;
+    const orderInfo = `Karaoke Online - Nap ${pack.hearts} Tim`;
     const baseUrl = resolveAppBaseUrl(req);
     const redirectUrl = `${baseUrl}/?momoReturn=1`;
     const ipnUrl = `${baseUrl}/api/momo/ipn`;
@@ -1429,8 +1429,8 @@ async function bootstrap() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           partnerCode: cfg.partnerCode,
-          partnerName: 'Diep Khuc Online',
-          storeId: 'DiepKhucOnline',
+          partnerName: 'Karaoke Online',
+          storeId: 'KaraokeOnline',
           requestId,
           amount,
           orderId,
@@ -1856,6 +1856,51 @@ async function bootstrap() {
     rooms.set(roomId, newRoom);
     broadcastRoomList();
     res.status(201).json({ room: serializeRoomSummary(newRoom) });
+  });
+
+  // Search Engine Crawlability: robots.txt & XML sitemap
+  app.get('/robots.txt', (req, res) => {
+    const baseUrl = resolveAppBaseUrl(req);
+    res
+      .type('text/plain; charset=utf-8')
+      .send(
+        [
+          'User-agent: *',
+          'Allow: /',
+          'Disallow: /api/',
+          'Disallow: /ws',
+          `Sitemap: ${baseUrl}/sitemap.xml`,
+        ].join('\n')
+      );
+  });
+
+  app.get('/sitemap.xml', (req, res) => {
+    const baseUrl = resolveAppBaseUrl(req);
+    const today = new Date().toISOString().split('T')[0];
+    const staticRoutes = [
+      { loc: '/', priority: '1.0', changefreq: 'daily' },
+      { loc: '/hat-karaoke-khong-quang-cao', priority: '0.95', changefreq: 'daily' },
+      { loc: '/nghe-nhac-youtube-mp3', priority: '0.95', changefreq: 'daily' },
+      { loc: '/nghe-nhac-khong-quang-cao', priority: '0.9', changefreq: 'daily' },
+      { loc: '/phong-hat-karaoke-truc-tuyen', priority: '0.85', changefreq: 'daily' },
+      { loc: '/phong-chat-va-game', priority: '0.8', changefreq: 'weekly' },
+      { loc: '/karaoke-sau-tim-thiep-hong-song-ca-LPrOVzOHgZQ', priority: '0.8', changefreq: 'weekly' },
+      { loc: '/karaoke-duyen-phan-tone-nu-CZO9CbtOEmg', priority: '0.8', changefreq: 'weekly' },
+      { loc: '/karaoke-noi-nay-co-anh-beat-ha-tong-t4rjaYhmazo', priority: '0.8', changefreq: 'weekly' },
+      { loc: '/lk-ca-nhac-bolero-tru-tinh-hay-nhat-mp3-WaXpzNZw4jI', priority: '0.8', changefreq: 'weekly' },
+      { loc: '/nhac-tre-ballad-hot-trend-mp3-S3bOgUn9Fg4', priority: '0.8', changefreq: 'weekly' },
+    ];
+    const urlEntries = staticRoutes
+      .map(
+        (u) =>
+          `  <url>\n    <loc>${baseUrl}${u.loc}</loc>\n    <lastmod>${today}</lastmod>\n    <changefreq>${u.changefreq}</changefreq>\n    <priority>${u.priority}</priority>\n  </url>`
+      )
+      .join('\n');
+    res
+      .type('application/xml; charset=utf-8')
+      .send(
+        `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urlEntries}\n</urlset>`
+      );
   });
 
   const server = http.createServer(app);
@@ -2587,7 +2632,7 @@ async function bootstrap() {
 
   const port = Number(process.env.PORT || 3000);
   server.listen(port, '0.0.0.0', () => {
-    console.log(`Diep Khuc Online server running at http://localhost:${port}`);
+    console.log(`Karaoke Online server running at http://localhost:${port}`);
   });
 }
 

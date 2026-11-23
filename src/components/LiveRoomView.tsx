@@ -478,17 +478,27 @@ export function LiveRoomView({
       ytHostRef.current.innerHTML = '';
       ytHostRef.current.appendChild(target);
 
-      ytPlayerRef.current = new window.YT.Player(target, {
+      ytPlayerRef.current = new (window.YT.Player as unknown as new (el: HTMLElement, opts: Record<string, unknown>) => typeof ytPlayerRef.current)(target, {
+        host: 'https://www.youtube-nocookie.com',
         videoId: initialYtId,
         playerVars: {
           autoplay: activeRoom.isPlaying ? 1 : 0,
           rel: 0,
           modestbranding: 1,
           playsinline: 1,
+          fs: 0,
+          iv_load_policy: 3,
+          origin: window.location.origin,
         },
         events: {
-          onReady: (e) => {
+          onReady: (e: { target: NonNullable<typeof ytPlayerRef.current> & { getIframe?: () => HTMLIFrameElement | null } }) => {
             if (!mounted) return;
+            const iframe = e.target.getIframe?.();
+            if (iframe) {
+              iframe.setAttribute('playsinline', '1');
+              iframe.setAttribute('webkit-playsinline', '1');
+              iframe.setAttribute('allow', 'autoplay; encrypted-media; picture-in-picture');
+            }
             ytReadyRef.current = true;
             e.target.setVolume?.(listenerYtVolume);
             if (activeRoom.isPlaying) {
@@ -504,7 +514,7 @@ export function LiveRoomView({
               }, 900);
             }
           },
-          onStateChange: (e) => {
+          onStateChange: (e: { data: number }) => {
             if (!mounted) return;
             if (e.data === 1) {
               setYtPlaybackBlocked(false);

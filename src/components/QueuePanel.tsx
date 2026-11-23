@@ -189,7 +189,7 @@ export function QueuePanel({
                       setDragIndex(null);
                       setDragOverIndex(null);
                     }}
-                    className={`px-3 py-3 flex items-center gap-2.5 transition-colors ${
+                    className={`px-3 py-3 flex flex-col gap-2 transition-colors ${
                       isDragging
                         ? 'opacity-50 bg-slate-800/60'
                         : isDragOver
@@ -197,34 +197,36 @@ export function QueuePanel({
                           : 'hover:bg-slate-800/40'
                     }`}
                   >
-                    <span
-                      className="text-slate-500 hover:text-slate-300 cursor-grab active:cursor-grabbing p-0.5 shrink-0"
-                      title="Kéo để đổi vị trí"
-                    >
-                      <GripVertical className="w-4 h-4" />
-                    </span>
+                    <div className="flex items-start gap-2.5 min-w-0">
+                      <span
+                        className="text-slate-500 hover:text-slate-300 cursor-grab active:cursor-grabbing pt-1 shrink-0"
+                        title="Kéo để đổi vị trí"
+                      >
+                        <GripVertical className="w-4 h-4" />
+                      </span>
 
-                    <span className="font-mono text-xs text-slate-500 tabular-nums w-5 text-center shrink-0">
-                      {idx + 1}
-                    </span>
+                      <span className="font-mono text-xs text-slate-500 tabular-nums w-4 text-center pt-1 shrink-0">
+                        {idx + 1}
+                      </span>
 
-                    <SongArtwork youtubeId={item.song.youtubeId} title={item.song.title} />
+                      <SongArtwork youtubeId={item.song.youtubeId} title={item.song.title} />
 
-                    <button
-                      type="button"
-                      onClick={() => onPlayNow(item.song)}
-                      className="flex-1 min-w-0 text-left group cursor-pointer"
-                      title="Phát bài này ngay"
-                    >
-                      <p className="text-sm font-semibold text-slate-100 group-hover:text-amber-400 truncate transition-colors">
-                        {item.song.title}
-                      </p>
-                      <p className="text-xs text-slate-400 truncate mt-0.5">
-                        {item.song.artist} · {formatTime(item.song.durationSeconds)}
-                      </p>
-                    </button>
+                      <button
+                        type="button"
+                        onClick={() => onPlayNow(item.song)}
+                        className="flex-1 min-w-0 text-left group cursor-pointer"
+                        title="Phát bài này ngay"
+                      >
+                        <p className="text-sm font-semibold text-slate-100 group-hover:text-amber-400 line-clamp-2 leading-snug transition-colors">
+                          {item.song.title}
+                        </p>
+                        <p className="text-xs text-slate-400 truncate mt-0.5">
+                          {item.song.artist} · {formatTime(item.song.durationSeconds)}
+                        </p>
+                      </button>
+                    </div>
 
-                    <div className="flex items-center gap-1 shrink-0">
+                    <div className="flex items-center justify-end gap-1.5 pl-10">
                       <button
                         type="button"
                         onClick={() => idx > 0 && onReorderQueue(idx, idx - 1)}
@@ -249,7 +251,7 @@ export function QueuePanel({
                         type="button"
                         onClick={() => onPrioritizeQueueItem(item.queueId)}
                         disabled={idx === 0}
-                        className="px-2 py-1.5 rounded-md bg-amber-500/15 hover:bg-amber-500/25 disabled:opacity-35 text-amber-300 text-xs font-medium transition-colors whitespace-nowrap cursor-pointer"
+                        className="px-2.5 py-1 rounded-md bg-amber-500/15 hover:bg-amber-500/25 disabled:opacity-35 text-amber-300 text-xs font-medium transition-colors whitespace-nowrap cursor-pointer"
                         title="Ưu tiên lên đầu hàng đợi"
                       >
                         Ưu tiên
@@ -312,46 +314,56 @@ export function QueuePanel({
                 return (
                   <div
                     key={song.id}
-                    className={`px-3.5 py-3 flex items-center gap-3 transition-colors ${
+                    className={`px-3.5 py-3 flex flex-col gap-2 transition-colors ${
                       isCurrent ? 'bg-amber-500/10' : 'hover:bg-slate-800/40'
                     }`}
                   >
-                    <button
-                      type="button"
-                      onClick={() => onPlayNow(song)}
-                      className="relative group shrink-0 cursor-pointer"
-                      title="Phát bài này ngay"
-                    >
-                      <SongArtwork youtubeId={song.youtubeId} title={song.title} />
-                      <span className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 rounded-md flex items-center justify-center transition-opacity">
-                        <Play className="w-4 h-4 text-amber-400 fill-amber-400" />
-                      </span>
-                    </button>
-
-                    <div className="flex-1 min-w-0">
+                    <div className="flex items-start gap-3 min-w-0">
                       <button
                         type="button"
                         onClick={() => onPlayNow(song)}
-                        className="text-left w-full cursor-pointer"
+                        className="relative group shrink-0 cursor-pointer mt-0.5"
+                        title="Phát bài này ngay"
                       >
-                        <p
-                          className={`text-sm font-semibold truncate ${
-                            isCurrent ? 'text-amber-400' : 'text-slate-100 hover:text-amber-300'
-                          }`}
-                        >
-                          {song.title}
-                        </p>
+                        <SongArtwork youtubeId={song.youtubeId} title={song.title} />
+                        <span className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 rounded-md flex items-center justify-center transition-opacity">
+                          <Play className="w-4 h-4 text-amber-400 fill-amber-400" />
+                        </span>
                       </button>
-                      <p className="text-xs text-slate-400 truncate mt-0.5">
-                        {song.artist} · {song.genre} · {formatTime(song.durationSeconds)}
-                      </p>
+
+                      <div className="flex-1 min-w-0">
+                        <button
+                          type="button"
+                          onClick={() => onPlayNow(song)}
+                          className="text-left w-full cursor-pointer"
+                        >
+                          <p
+                            className={`text-sm font-semibold line-clamp-2 leading-snug ${
+                              isCurrent ? 'text-amber-400' : 'text-slate-100 hover:text-amber-300'
+                            }`}
+                          >
+                            {song.title}
+                          </p>
+                        </button>
+                        <p className="text-xs text-slate-400 truncate mt-1">
+                          {song.artist} · {song.genre} · {formatTime(song.durationSeconds)}
+                        </p>
+                      </div>
                     </div>
 
-                    <div className="flex items-center gap-1.5 shrink-0">
+                    <div className="flex items-center justify-end gap-1.5 pl-[68px]">
+                      <button
+                        type="button"
+                        onClick={() => onPlayNow(song)}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-slate-800/90 hover:bg-slate-700 text-slate-200 text-xs font-medium transition-colors whitespace-nowrap cursor-pointer"
+                      >
+                        <Play className="w-3 h-3 text-amber-400 fill-amber-400" />
+                        <span>Hát ngay</span>
+                      </button>
                       <button
                         type="button"
                         onClick={() => onAddToQueue(song)}
-                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-medium transition-colors whitespace-nowrap cursor-pointer"
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-medium transition-colors whitespace-nowrap cursor-pointer"
                       >
                         <Plus className="w-3.5 h-3.5 text-emerald-400" />
                         <span>Chọn bài</span>
@@ -359,7 +371,7 @@ export function QueuePanel({
                       <button
                         type="button"
                         onClick={() => onPrioritizeSong(song)}
-                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 text-xs font-medium transition-colors whitespace-nowrap cursor-pointer"
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 text-xs font-medium transition-colors whitespace-nowrap cursor-pointer"
                         title="Đẩy lên đầu hàng chờ"
                       >
                         <ArrowUpCircle className="w-3.5 h-3.5" />

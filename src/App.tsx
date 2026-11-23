@@ -15,6 +15,7 @@ import {
 import {
   buildSongUrlPath,
   parseMediaUrlPath,
+  parseStaticSeoView,
   updateDocumentSeo,
 } from './utils/vietnamese';
 import { useRealtimeSocket } from './hooks/useRealtimeSocket';
@@ -29,6 +30,7 @@ import { AuthModal } from './components/AuthModal';
 import { YahooChat } from './components/YahooChat';
 import { TienLenGame } from './components/TienLenGame';
 import { CaroGame } from './components/CaroGame';
+import { SeoContentSection } from './components/SeoContentSection';
 import { ToastContainer } from './components/ToastContainer';
 
 const STORAGE_QUEUE_KEY = 'diepkhuc_queue_v1';
@@ -118,6 +120,11 @@ export default function App() {
     return parseMediaUrlPath(window.location.pathname);
   }, []);
 
+  const initialStaticView = useMemo(() => {
+    if (typeof window === 'undefined') return null;
+    return parseStaticSeoView(window.location.pathname);
+  }, []);
+
   const initialMomoReturnParams = useMemo(() => {
     if (typeof window === 'undefined') return null;
     const sp = new URLSearchParams(window.location.search);
@@ -135,9 +142,11 @@ export default function App() {
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [nickname, setNickname] = useState<string>(getInitialNickname);
-  const [activeView, setActiveView] = useState<AppView>(() =>
-    initialRoute?.kind === 'mp3' ? 'music' : 'stage'
-  );
+  const [activeView, setActiveView] = useState<AppView>(() => {
+    if (initialRoute?.kind === 'mp3') return 'music';
+    if (initialStaticView) return initialStaticView;
+    return 'stage';
+  });
   const [initialMp3YoutubeId] = useState<string | null>(() =>
     initialRoute?.kind === 'mp3' ? initialRoute.youtubeId : null
   );
@@ -345,14 +354,45 @@ export default function App() {
     });
   }, [subscribe]);
 
-  // Dynamic URL (song name before ID) and SEO descriptions containing "karaoke" for Karaoke views
+  // Dynamic URL (song name before ID) and SEO metadata across views
   useEffect(() => {
     if (activeView === 'music' && !isTvMode) return;
+
+    if (!isTvMode && activeView === 'browse') {
+      updateDocumentSeo({
+        title: 'Kho Nhạc Hát Karaoke Không Quảng Cáo | Karaoke Online',
+        description:
+          'Kho bài hát karaoke không quảng cáo pop-up: lọc sẵn Bolero, Nhạc Trẻ, Remix beat chuẩn YouTube, chạy trực tiếp trong trình duyệt điện thoại không nhảy app.',
+        path: '/hat-karaoke-khong-quang-cao',
+      });
+      return;
+    }
+
+    if (!isTvMode && activeView === 'rooms') {
+      updateDocumentSeo({
+        title: 'Phòng Hát Karaoke Trực Tuyến Mic Live | Karaoke Online',
+        description:
+          'Vào phòng hát karaoke trực tuyến miễn phí, bật mic echo trộn cùng nhạc nền YouTube, tặng tim cổ vũ và hát karaoke không quảng cáo cùng bạn bè.',
+        path: '/phong-hat-karaoke-truc-tuyen',
+      });
+      return;
+    }
+
+    if (!isTvMode && activeView === 'social') {
+      updateDocumentSeo({
+        title: 'Phòng Chat Yahoo & Sảnh Game Tiến Lên, Cờ Caro | Karaoke Online',
+        description:
+          'Vừa hát karaoke không quảng cáo vừa nghe nhạc YouTube MP3, chat phòng Yahoo hoài niệm và chơi Tiến Lên, Cờ Caro nhiều người chơi thực tế.',
+        path: '/phong-chat-va-game',
+      });
+      return;
+    }
+
     const cleanTitle = currentSong.title;
     const displayTitle = cleanTitle.toLowerCase().includes('karaoke')
-      ? `${cleanTitle} | Điệp Khúc Online`
-      : `${cleanTitle} Karaoke | Điệp Khúc Online`;
-    const description = `Hát karaoke trực tuyến bài hát ${cleanTitle} - ${currentSong.artist} (${currentSong.genre}). Nhạc karaoke beat chuẩn chữ chạy dễ hát, hỗ trợ phòng hát Live và nghe nền khi tắt màn hình.`;
+      ? `${cleanTitle} — Hát Karaoke Không Quảng Cáo | Karaoke Online`
+      : `${cleanTitle} Karaoke — Hát Karaoke Không Quảng Cáo | Karaoke Online`;
+    const description = `Hát karaoke không quảng cáo bài ${cleanTitle} - ${currentSong.artist} (${currentSong.genre}). Beat chuẩn chữ chạy dễ hát ngay trong trình duyệt điện thoại, hỗ trợ phòng hát Live và nghe nhạc tắt màn hình.`;
     const path = buildSongUrlPath(cleanTitle, currentSong.youtubeId, 'karaoke');
     updateDocumentSeo({ title: displayTitle, description, path });
   }, [
@@ -650,7 +690,9 @@ export default function App() {
         {(isTvMode || activeView === 'stage') && (
           <div
             className={`grid gap-6 items-start ${
-              isTvMode ? 'grid-cols-1 max-w-6xl mx-auto' : 'grid-cols-1 lg:grid-cols-[7fr_3fr]'
+              isTvMode
+                ? 'grid-cols-1 max-w-6xl mx-auto'
+                : 'grid-cols-1 lg:grid-cols-[65fr_35fr] xl:grid-cols-[68fr_32fr]'
             }`}
           >
             <KaraokePlayer
@@ -799,10 +841,12 @@ export default function App() {
             </div>
           </section>
         )}
+
+        {!isTvMode && <SeoContentSection onNavigateView={setActiveView} />}
       </main>
 
       <footer className="border-t border-slate-800/70 py-5 px-4 sm:px-6 text-center text-xs text-slate-500">
-        Điệp Khúc Online · Kho Nhạc Karaoke, Phòng Hát Riêng Truyền Mic Live, Mua & Tặng Tim, Chat Yahoo & Game
+        Karaoke Online · Hát Karaoke Không Quảng Cáo, Nghe Nhạc YouTube MP3 Không Quảng Cáo, Phòng Hát Mic Live &amp; Sảnh Game
       </footer>
 
       <HeartStoreModal
