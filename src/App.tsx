@@ -1,0 +1,622 @@
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { Spade, Grid3X3 } from 'lucide-react';
+import { KARAOKE_SONGS } from './data/songs';
+import { AppView, LiveRoomSummary, QueueItem, Song, ToastMessage, WeeklyGifterEntry } from './types/karaoke';
+import { useRealtimeSocket } from './hooks/useRealtimeSocket';
+import { Header } from './components/Header';
+import { KaraokePlayer } from './components/KaraokePlayer';
+import { QueuePanel } from './components/QueuePanel';
+import { BrowseCatalogPage } from './components/BrowseCatalogPage';
+import { MusicListenPage } from './components/MusicListenPage';
+import { LiveRoomView } from './components/LiveRoomView';
+import { HeartStoreModal } from './components/HeartStoreModal';
+import { YahooChat } from './components/YahooChat';
+import { TienLenGame } from './components/TienLenGame';
+import { CaroGame } from './components/CaroGame';
+import { ToastContainer } from './components/ToastContainer';
+
+const STORAGE_QUEUE_KEY = 'diepkhuc_queue_v1';
+const STORAGE_CURRENT_KEY = 'diepkhuc_current_v1';
+const STORAGE_UID_KEY = 'diepkhuc_user_id_v1';
+const STORAGE_NICK_KEY = 'diepkhuc_ym_nick';
+const STORAGE_BLOCKED_KEY = 'diepkhuc_blocked_yt_v1';
+
+function getOrCreateUserId(): string {
+  try {
+    const existing = localStorage.getItem(STORAGE_UID_KEY);
+    if (existing) return existing;
+    const next = `u-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    localStorage.setItem(STORAGE_UID_KEY, next);
+    return next;
+  } catch {
+    return `u-${Math.random().toString(36).slice(2, 9)}`;
+  }
+}
+
+function getInitialNickname(): string {
+  try {
+    return localStorage.getItem(STORAGE_NICK_KEY) || 'ca_si_online';
+  } catch {
+    return 'ca_si_online';
+  }
+}
+
+function healSongFromCatalog(song: Song): Song {
+  const fresh = KARAOKE_SONGS.find((s) => s.id === song.id);
+  return fresh || song;
+}
+
+function loadInitialBlockedIds(): string[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_BLOCKED_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.filter((x): x is string => typeof x === 'string');
+    }
+  } catch {
+    // Ignore parse error
+  }
+  return [];
+}
+
+function loadInitialCurrentSong(): Song {
+  try {
+    const raw = localStorage.getItem(STORAGE_CURRENT_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Song;
+      if (parsed && parsed.youtubeId && parsed.title) {
+        return healSongFromCatalog(parsed);
+      }
+    }
+  } catch {
+    // Ignore parse error
+  }
+  return KARAOKE_SONGS[0];
+}
+
+function loadInitialQueue(): QueueItem[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_QUEUE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as QueueItem[];
+      if (Array.isArray(parsed)) {
+        return parsed.map((item) => ({
+          ...item,
+          song: healSongFromCatalog(item.song),
+        }));
+      }
+    }
+  } catch {
+    // Ignore parse error
+  }
+  return [
+    { queueId: 'init-1', song: KARAOKE_SONGS[5], addedAt: Date.now() },
+    { queueId: 'init-2', song: KARAOKE_SONGS[1], addedAt: Date.now() + 1 },
+    { queueId: 'init-3', song: KARAOKE_SONGS[11], addedAt: Date.now() + 2 },
+  ];
+}
+
+export default function App() {
+  const [userId] = useState<string>(getOrCreateUserId);
+  const [nickname, setNickname] = useState<string>(getInitialNickname);
+  const [activeView, setActiveView] = useState<AppView>('stage');
+  const [currentSong, setCurrentSong] = useState<Song>(loadInitialCurrentSong);
+  const [queue, setQueue] = useState<QueueItem[]>(loadInitialQueue);
+  const [blockedIds, setBlockedIds] = useState<string[]>(loadInitialBlockedIds);
+  const [isTvMode, setIsTvMode] = useState(false);
+  const [activeGame, setActiveGame] = useState<'tien-len' | 'caro'>('tien-len');
+  const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const [sharedToChat, setSharedToChat] = useState<{ song: Song; seq: number } | null>(null);
+
+  // Realtime Server State (Heart Wallet + Live Singing Rooms + Weekly Leaderboard)
+  const [heartsBalance, setHeartsBalance] = useState<number>(30);
+  const [liveRooms, setLiveRooms] = useState<LiveRoomSummary[]>([]);
+  const [heartLeaderboard, setHeartLeaderboard] = useState<WeeklyGifterEntry[]>([]);
+  const [isHeartStoreOpen, setIsHeartStoreOpen] = useState(false);
+  const [roomCreateSong, setRoomCreateSong] = useState<Song | null>(null);
+
+  const queueRef = useRef<QueueItem[]>(queue);
+  queueRef.current = queue;
+
+  const { connected, sendEvent, subscribe } = useRealtimeSocket(userId, nickname);
+
+  const blockedSet = useMemo(() => new Set(blockedIds), [blockedIds]);
+  const visibleCatalog = useMemo(
+    () => KARAOKE_SONGS.filter((s) => !blockedSet.has(s.youtubeId)),
+    [blockedSet]
+  );
+
+  const addToast = useCallback(
+    (message: string, type: 'info' | 'success' | 'warning' = 'success') => {
+      const id = `toast-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      setToasts((prev) => [...prev.slice(-3), { id, message, type }]);
+      window.setTimeout(() => {
+        setToasts((prev) => prev.filter((t) => t.id !== id));
+      }, 3400);
+    },
+    []
+  );
+
+  const dismissToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  // Load wallet, rooms & weekly leaderboard initially via REST and keep synced via WebSocket
+  useEffect(() => {
+    fetch(`/api/wallet/${encodeURIComponent(userId)}`)
+      .then((r) => r.json())
+      .then((d: { heartsBalance?: number }) => {
+        if (typeof d.heartsBalance === 'number') setHeartsBalance(d.heartsBalance);
+      })
+      .catch(() => {});
+
+    fetch('/api/rooms')
+      .then((r) => r.json())
+      .then((d: { rooms?: LiveRoomSummary[] }) => {
+        if (Array.isArray(d.rooms)) setLiveRooms(d.rooms);
+      })
+      .catch(() => {});
+
+    fetch('/api/leaderboard/hearts')
+      .then((r) => r.json())
+      .then((d: { entries?: WeeklyGifterEntry[] }) => {
+        if (Array.isArray(d.entries)) setHeartLeaderboard(d.entries);
+      })
+      .catch(() => {});
+
+    fetch('/api/youtube/blocked')
+      .then((r) => r.json())
+      .then((d: { blockedIds?: string[] }) => {
+        if (Array.isArray(d.blockedIds) && d.blockedIds.length > 0) {
+          setBlockedIds((prev) => Array.from(new Set([...prev, ...d.blockedIds!])));
+        }
+      })
+      .catch(() => {});
+  }, [userId]);
+
+  useEffect(() => {
+    return subscribe((type, payload) => {
+      if (type === 'wallet:updated' && typeof payload.heartsBalance === 'number') {
+        setHeartsBalance(payload.heartsBalance);
+      } else if (type === 'rooms:list' && Array.isArray(payload.rooms)) {
+        setLiveRooms(payload.rooms as LiveRoomSummary[]);
+      } else if (type === 'leaderboard:hearts_updated' && Array.isArray(payload.entries)) {
+        setHeartLeaderboard(payload.entries as WeeklyGifterEntry[]);
+      }
+    });
+  }, [subscribe]);
+
+  // Persist queue, current song & nickname
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_QUEUE_KEY, JSON.stringify(queue));
+    } catch {
+      // Ignore
+    }
+  }, [queue]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_CURRENT_KEY, JSON.stringify(currentSong));
+    } catch {
+      // Ignore
+    }
+  }, [currentSong]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_BLOCKED_KEY, JSON.stringify(blockedIds));
+    } catch {
+      // Ignore
+    }
+  }, [blockedIds]);
+
+  const handleNicknameChange = useCallback((nextNick: string) => {
+    setNickname(nextNick);
+    try {
+      localStorage.setItem(STORAGE_NICK_KEY, nextNick);
+    } catch {
+      // Ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    const onFsChange = () => {
+      if (!document.fullscreenElement && isTvMode) {
+        setIsTvMode(false);
+      }
+    };
+    document.addEventListener('fullscreenchange', onFsChange);
+    return () => document.removeEventListener('fullscreenchange', onFsChange);
+  }, [isTvMode]);
+
+  const handleToggleTvMode = useCallback(() => {
+    setActiveView('stage');
+    const next = !isTvMode;
+    setIsTvMode(next);
+    if (next) {
+      document.documentElement.requestFullscreen?.().catch(() => {});
+      addToast('Đã bật chế độ Toàn màn hình (TV Mode).', 'info');
+    } else {
+      if (document.fullscreenElement) {
+        document.exitFullscreen?.().catch(() => {});
+      }
+      addToast('Đã thoát chế độ TV Mode.', 'info');
+    }
+  }, [addToast, isTvMode]);
+
+  const handlePlayNow = useCallback(
+    (song: Song) => {
+      setCurrentSong(song);
+      setActiveView('stage');
+      addToast(`Đang phát: ${song.title}`, 'success');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    },
+    [addToast]
+  );
+
+  const handleAddToQueue = useCallback(
+    (song: Song) => {
+      const newItem: QueueItem = {
+        queueId: `q-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        song,
+        addedAt: Date.now(),
+      };
+      setQueue((prev) => [...prev, newItem]);
+      addToast(`Đã thêm "${song.title}" vào danh sách chờ.`, 'success');
+    },
+    [addToast]
+  );
+
+  const handlePrioritizeSong = useCallback(
+    (song: Song) => {
+      const newItem: QueueItem = {
+        queueId: `q-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        song,
+        addedAt: Date.now(),
+      };
+      setQueue((prev) => [newItem, ...prev]);
+      addToast(`Đã ưu tiên "${song.title}" lên đầu hàng chờ!`, 'info');
+    },
+    [addToast]
+  );
+
+  const handlePrioritizeQueueItem = useCallback(
+    (queueId: string) => {
+      const current = queueRef.current;
+      const idx = current.findIndex((item) => item.queueId === queueId);
+      if (idx <= 0) return;
+      const target = current[idx];
+      setQueue((prev) => {
+        const i = prev.findIndex((item) => item.queueId === queueId);
+        if (i <= 0) return prev;
+        return [prev[i], ...prev.slice(0, i), ...prev.slice(i + 1)];
+      });
+      addToast(`Đã đẩy "${target.song.title}" lên đầu hàng chờ.`, 'info');
+    },
+    [addToast]
+  );
+
+  const handleRemoveFromQueue = useCallback(
+    (queueId: string) => {
+      const target = queueRef.current.find((item) => item.queueId === queueId);
+      setQueue((prev) => prev.filter((item) => item.queueId !== queueId));
+      if (target) {
+        addToast(`Đã xóa "${target.song.title}" khỏi danh sách.`, 'warning');
+      }
+    },
+    [addToast]
+  );
+
+  const handleReorderQueue = useCallback((fromIndex: number, toIndex: number) => {
+    setQueue((prev) => {
+      if (fromIndex < 0 || toIndex < 0 || fromIndex >= prev.length || toIndex >= prev.length) {
+        return prev;
+      }
+      const next = [...prev];
+      const [moved] = next.splice(fromIndex, 1);
+      next.splice(toIndex, 0, moved);
+      return next;
+    });
+  }, []);
+
+  const handleClearQueue = useCallback(() => {
+    setQueue([]);
+    addToast('Đã xóa toàn bộ danh sách chờ.', 'warning');
+  }, [addToast]);
+
+  const handleNextSong = useCallback(() => {
+    const current = queueRef.current;
+    if (current.length === 0) {
+      addToast('Đã hết bài trong danh sách chờ.', 'info');
+      return;
+    }
+    const [nextItem] = current;
+    setQueue((prev) => prev.slice(1));
+    setCurrentSong(nextItem.song);
+    addToast(`Chuyển sang bài: ${nextItem.song.title}`, 'success');
+  }, [addToast]);
+
+  const handleShareToChat = useCallback(
+    (song: Song) => {
+      setSharedToChat((prev) => ({ song, seq: (prev?.seq ?? 0) + 1 }));
+      setActiveView('social');
+      addToast(`Đã gửi lời mời hát "${song.title}" vào phòng chat!`, 'success');
+    },
+    [addToast]
+  );
+
+  const handlePlaySharedFromChat = useCallback(
+    (youtubeId: string, title: string, artist: string) => {
+      const existing = KARAOKE_SONGS.find((s) => s.youtubeId === youtubeId);
+      if (existing) {
+        handlePlayNow(existing);
+      } else {
+        handlePlayNow({
+          id: `shared-${youtubeId}-${Date.now()}`,
+          youtubeId,
+          title,
+          artist,
+          genre: 'Nhạc Trẻ',
+          durationSeconds: 240,
+          lyrics: ['Đang phát bài hát được chia sẻ từ phòng chat Yahoo!'],
+        });
+      }
+    },
+    [handlePlayNow]
+  );
+
+  const handleOpenRoomWithSong = useCallback((song: Song) => {
+    setRoomCreateSong(song);
+    setActiveView('rooms');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, []);
+
+  const handleReportBrokenVideo = useCallback(
+    (youtubeId: string, title: string) => {
+      if (!youtubeId) return;
+      setBlockedIds((prev) => (prev.includes(youtubeId) ? prev : [...prev, youtubeId]));
+      fetch('/api/youtube/block', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ youtubeId }),
+      }).catch(() => {});
+
+      addToast(
+        `Video "${title || youtubeId}" không cho phép nhúng hoặc bị lỗi, đã tự động ẩn.`,
+        'warning'
+      );
+
+      const filtered = queueRef.current.filter((item) => item.song.youtubeId !== youtubeId);
+      if (currentSong.youtubeId === youtubeId) {
+        if (filtered.length > 0) {
+          const [nextItem, ...rest] = filtered;
+          setQueue(rest);
+          setCurrentSong(nextItem.song);
+          return;
+        }
+        setQueue(filtered);
+        const fallback =
+          KARAOKE_SONGS.find(
+            (s) => s.youtubeId !== youtubeId && !blockedSet.has(s.youtubeId)
+          ) || KARAOKE_SONGS[0];
+        if (fallback && fallback.youtubeId !== youtubeId) {
+          setCurrentSong(fallback);
+        }
+      } else {
+        setQueue(filtered);
+      }
+    },
+    [addToast, blockedSet, currentSong.youtubeId]
+  );
+
+  const handleSearchKaraokeFromMusic = useCallback(
+    async (rawTitle: string) => {
+      const cleanQuery = rawTitle.split(/[-|([♫]/)[0].trim() || rawTitle;
+      addToast(`Đang tìm bản Karaoke cho "${cleanQuery}"...`, 'info');
+      try {
+        const res = await fetch(
+          `/api/youtube/search?q=${encodeURIComponent(cleanQuery)}&karaokeOnly=true`
+        );
+        const data = (await res.json()) as { items?: Song[] };
+        const found = Array.isArray(data.items)
+          ? data.items.find((s) => !blockedSet.has(s.youtubeId))
+          : undefined;
+        if (found) {
+          handlePlayNow(found);
+          return;
+        }
+      } catch {
+        // Fallback to browse view
+      }
+      setActiveView('browse');
+      addToast('Hãy chọn bài hát Karaoke trong kho nhạc!', 'info');
+    },
+    [addToast, blockedSet, handlePlayNow]
+  );
+
+  return (
+    <div className="min-h-screen bg-[#090B10] text-slate-100 flex flex-col">
+      <Header
+        songs={visibleCatalog}
+        blockedYoutubeIds={blockedSet}
+        activeView={activeView}
+        isTvMode={isTvMode}
+        heartsBalance={heartsBalance}
+        onChangeView={setActiveView}
+        onToggleTvMode={handleToggleTvMode}
+        onOpenHeartStore={() => setIsHeartStoreOpen(true)}
+        onAddToQueue={handleAddToQueue}
+        onPrioritizeSong={handlePrioritizeSong}
+        onPlayNow={handlePlayNow}
+      />
+
+      <main className="flex-1 w-full max-w-[1600px] mx-auto px-4 sm:px-6 py-5 sm:py-6 space-y-8">
+        {/* VIEW 1: Dedicated Browse & Filter All Karaoke Music Page */}
+        {!isTvMode && activeView === 'browse' && (
+          <BrowseCatalogPage
+            songs={visibleCatalog}
+            blockedYoutubeIds={blockedSet}
+            currentSongId={currentSong.id}
+            onListenAndSing={handlePlayNow}
+            onAddToQueue={handleAddToQueue}
+            onPrioritizeSong={handlePrioritizeSong}
+            onOpenRoomWithSong={handleOpenRoomWithSong}
+          />
+        )}
+
+        {/* VIEW 2: Main 70/30 Karaoke Stage (also shown in TV Mode) */}
+        {(isTvMode || activeView === 'stage') && (
+          <div
+            className={`grid gap-6 items-start ${
+              isTvMode ? 'grid-cols-1 max-w-6xl mx-auto' : 'grid-cols-1 lg:grid-cols-[7fr_3fr]'
+            }`}
+          >
+            <KaraokePlayer
+              currentSong={currentSong}
+              hasNext={queue.length > 0}
+              isTvMode={isTvMode}
+              onSongEnded={handleNextSong}
+              onNext={handleNextSong}
+              onShareToChat={handleShareToChat}
+              onReportBrokenVideo={handleReportBrokenVideo}
+              onToast={addToast}
+            />
+
+            {!isTvMode && (
+              <QueuePanel
+                queue={queue}
+                catalog={visibleCatalog}
+                currentSongId={currentSong.id}
+                onPlayNow={handlePlayNow}
+                onAddToQueue={handleAddToQueue}
+                onPrioritizeSong={handlePrioritizeSong}
+                onPrioritizeQueueItem={handlePrioritizeQueueItem}
+                onRemoveFromQueue={handleRemoveFromQueue}
+                onReorderQueue={handleReorderQueue}
+                onClearQueue={handleClearQueue}
+              />
+            )}
+          </div>
+        )}
+
+        {/* VIEW 3: Dedicated YouTube Music Listening Page (All Genres, Hot & New, History) */}
+        {!isTvMode && activeView === 'music' && (
+          <MusicListenPage
+            blockedYoutubeIds={blockedSet}
+            onReportBrokenVideo={handleReportBrokenVideo}
+            onSearchKaraokeVersion={handleSearchKaraokeFromMusic}
+            onToast={addToast}
+          />
+        )}
+
+        {/* VIEW 4: Private Live Singing Rooms (YouTube + WebRTC Mic Audio + Hearts & Gifts) */}
+        {!isTvMode && activeView === 'rooms' && (
+          <LiveRoomView
+            userId={userId}
+            userName={nickname}
+            songs={visibleCatalog}
+            blockedYoutubeIds={blockedSet}
+            initialSongForCreate={roomCreateSong}
+            heartsBalance={heartsBalance}
+            rooms={liveRooms}
+            heartLeaderboard={heartLeaderboard}
+            connected={connected}
+            sendEvent={sendEvent}
+            subscribe={subscribe}
+            onOpenHeartStore={() => setIsHeartStoreOpen(true)}
+            onToast={addToast}
+            onReportBrokenVideo={handleReportBrokenVideo}
+            onClearInitialCreateSong={() => setRoomCreateSong(null)}
+          />
+        )}
+
+        {/* VIEW 4 (or shown below Stage): Yahoo! Messenger Chat Rooms & Games */}
+        {!isTvMode && (activeView === 'social' || activeView === 'stage') && (
+          <section className="pt-4 border-t border-slate-800/80 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="font-display text-xl sm:text-2xl font-bold text-slate-50">
+                  Phòng Chat Yahoo & Sảnh Game Giải Trí
+                </h2>
+                <p className="text-sm text-slate-400 mt-0.5">
+                  Vừa nghêu ngao hát Karaoke vừa tám chuyện cùng bạn bè hoặc làm ván Tiến Lên, Cờ Caro
+                </p>
+              </div>
+
+              <div
+                id="games-section"
+                className="flex items-center gap-1 p-1 rounded-xl bg-slate-900 border border-slate-800"
+              >
+                <button
+                  type="button"
+                  onClick={() => setActiveGame('tien-len')}
+                  className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                    activeGame === 'tien-len'
+                      ? 'bg-emerald-600 text-white'
+                      : 'text-slate-300 hover:text-white hover:bg-slate-800'
+                  }`}
+                >
+                  <Spade className="w-4 h-4" />
+                  <span>Bài Tiến Lên</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveGame('caro')}
+                  className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap cursor-pointer ${
+                    activeGame === 'caro'
+                      ? 'bg-amber-500 text-slate-950'
+                      : 'text-slate-300 hover:text-white hover:bg-slate-800'
+                  }`}
+                >
+                  <Grid3X3 className="w-4 h-4" />
+                  <span>Cờ Caro</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
+              <div className="lg:col-span-5">
+                <YahooChat
+                  userId={userId}
+                  nickname={nickname}
+                  onNicknameChange={handleNicknameChange}
+                  currentSong={currentSong}
+                  incomingSharedSong={sharedToChat}
+                  connected={connected}
+                  sendEvent={sendEvent}
+                  subscribe={subscribe}
+                  onPlaySharedSong={handlePlaySharedFromChat}
+                  onToast={addToast}
+                />
+              </div>
+
+              <div className="lg:col-span-7">
+                {activeGame === 'tien-len' ? (
+                  <TienLenGame onToast={addToast} />
+                ) : (
+                  <CaroGame onToast={addToast} />
+                )}
+              </div>
+            </div>
+          </section>
+        )}
+      </main>
+
+      <footer className="border-t border-slate-800/70 py-5 px-4 sm:px-6 text-center text-xs text-slate-500">
+        Điệp Khúc Online · Kho Nhạc Karaoke, Phòng Hát Riêng Truyền Mic Live, Mua & Tặng Tim, Chat Yahoo & Game
+      </footer>
+
+      <HeartStoreModal
+        isOpen={isHeartStoreOpen}
+        userId={userId}
+        heartsBalance={heartsBalance}
+        onClose={() => setIsHeartStoreOpen(false)}
+        onBalanceUpdated={setHeartsBalance}
+        onToast={addToast}
+      />
+
+      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
+    </div>
+  );
+}

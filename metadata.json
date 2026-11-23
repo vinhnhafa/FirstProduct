@@ -1,0 +1,6 @@
+{
+  "name": "Điệp Khúc Online",
+  "description": "Ứng dụng Karaoke trực tuyến nền tối sang trọng với trình phát YouTube, lời bài hát đồng bộ, kho nhạc Việt phong phú, phòng chat Yahoo cổ điển và game Tiến Lên, Cờ Caro.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
