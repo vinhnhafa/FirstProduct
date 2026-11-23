@@ -92,7 +92,7 @@ export function BrowseCatalogPage({
     };
   }, [detectedYoutubeId]);
 
-  // Automatically load Karaoke data from YouTube without an API key when genre, filter, or search changes
+  // Automatically load Karaoke data from YouTube when genre, filter, or search changes
   useEffect(() => {
     if (!autoLoadYoutube || detectedYoutubeId) {
       setYtSongs([]);
@@ -196,7 +196,7 @@ export function BrowseCatalogPage({
               Kho Nhạc Karaoke YouTube — Lọc & Nghe Ngay
             </h1>
             <p className="text-sm text-slate-400 mt-1">
-              Tự động tải dữ liệu nhạc Karaoke từ YouTube không cần API Key — lọc riêng bản Karaoke theo thể loại & tone giọng.
+              Kho nhạc Karaoke trực tuyến tuyển chọn từ YouTube — lọc riêng bản Karaoke theo thể loại & tone giọng.
             </p>
           </div>
 

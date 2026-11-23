@@ -86,7 +86,7 @@ export function Header({
     };
   }, [detectedYoutubeId]);
 
-  // Auto-search real YouTube Karaoke videos without API key
+  // Auto-search real YouTube Karaoke videos
   useEffect(() => {
     const trimmed = query.trim();
     if (!trimmed || detectedYoutubeId || trimmed.length < 2) {
@@ -202,7 +202,7 @@ export function Header({
                   handleSubmitYoutube('queue');
                 }
               }}
-              placeholder="Tìm bài Karaoke trên YouTube (không cần API) hoặc dán link YouTube..."
+              placeholder="Tìm bài Karaoke trên YouTube hoặc dán link YouTube..."
               aria-label="Tìm bài hát hoặc dán link YouTube"
               className="w-full h-10 pl-10 pr-9 rounded-lg bg-slate-900/90 border border-slate-700/80 text-sm text-slate-100 placeholder:text-slate-400 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500/50 transition-colors"
             />

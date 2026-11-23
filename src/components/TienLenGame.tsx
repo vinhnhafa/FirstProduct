@@ -1,31 +1,32 @@
-import { useState, useEffect, useCallback } from 'react';
-import { RotateCcw, Sparkles, Volume2, VolumeX, ArrowUpDown, SkipForward, Trophy } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import {
+  Spade,
+  Users,
+  Plus,
+  LogOut,
+  Play,
+  Volume2,
+  VolumeX,
+  Trophy,
+  Send,
+  Eye,
+  Clock,
+} from 'lucide-react';
+import { Card, Suit } from '../../shared/gameEngine';
+import { GameRoomDetail, GameRoomSummary } from '../types/karaoke';
+import { WsListener } from '../hooks/useRealtimeSocket';
 import { playCardSound, playWinSound } from '../utils/vietnamese';
 
-type Suit = 0 | 1 | 2 | 3; // 0: ♠, 1: ♣, 2: ♦, 3: ♥
-interface Card {
-  id: string;
-  rank: number; // 3..15 (11=J, 12=Q, 13=K, 14=A, 15=2)
-  suit: Suit;
+interface TienLenGameProps {
+  userId: string;
+  userName: string;
+  rooms: GameRoomSummary[];
+  connected: boolean;
+  sendEvent: (type: string, payload?: Record<string, unknown>) => void;
+  subscribe: (listener: WsListener) => () => void;
+  onToast: (message: string, type?: 'info' | 'success' | 'warning') => void;
 }
 
-type ComboType =
-  | 'SINGLE'
-  | 'PAIR'
-  | 'TRIPLE'
-  | 'STRAIGHT'
-  | 'PINE_3'
-  | 'FOUR_KIND'
-  | 'PINE_4';
-
-interface Combo {
-  type: ComboType;
-  label: string;
-  length: number;
-  highCard: Card;
-}
-
-const SUIT_SYMBOLS: Record<Suit, string> = { 0: '♠', 1: '♣', 2: '♦', 3: '♥' };
 const RANK_LABELS: Record<number, string> = {
   3: '3',
   4: '4',
@@ -42,222 +43,14 @@ const RANK_LABELS: Record<number, string> = {
   15: '2',
 };
 
-const PLAYER_NAMES = ['Bạn', 'Tư Béo', 'Bảy Lúa', 'Út Lan'];
+const SUIT_SYMBOL: Record<Suit, string> = {
+  spades: '♠',
+  clubs: '♣',
+  diamonds: '♦',
+  hearts: '♥',
+};
 
-function cardPower(c: Card): number {
-  return c.rank * 4 + c.suit;
-}
-
-function sortCards(cards: Card[]): Card[] {
-  return [...cards].sort((a, b) => cardPower(a) - cardPower(b));
-}
-
-function createShuffledDeck(): Card[] {
-  const deck: Card[] = [];
-  for (let r = 3; r <= 15; r++) {
-    for (let s = 0; s <= 3; s++) {
-      deck.push({ id: `${r}-${s}`, rank: r, suit: s as Suit });
-    }
-  }
-  for (let i = deck.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [deck[i], deck[j]] = [deck[j], deck[i]];
-  }
-  return deck;
-}
-
-function analyzeCombo(cards: Card[]): Combo | null {
-  if (cards.length === 0) return null;
-  const sorted = sortCards(cards);
-  const n = sorted.length;
-
-  if (n === 1) {
-    return {
-      type: 'SINGLE',
-      label: `Lá lẻ ${RANK_LABELS[sorted[0].rank]}${SUIT_SYMBOLS[sorted[0].suit]}`,
-      length: 1,
-      highCard: sorted[0],
-    };
-  }
-
-  if (n === 2 && sorted[0].rank === sorted[1].rank) {
-    return {
-      type: 'PAIR',
-      label: `Đôi ${RANK_LABELS[sorted[0].rank]}`,
-      length: 2,
-      highCard: sorted[1],
-    };
-  }
-
-  if (n === 3 && sorted[0].rank === sorted[1].rank && sorted[1].rank === sorted[2].rank) {
-    return {
-      type: 'TRIPLE',
-      label: `Sám cô ${RANK_LABELS[sorted[0].rank]}`,
-      length: 3,
-      highCard: sorted[2],
-    };
-  }
-
-  if (n === 4 && sorted.every((c) => c.rank === sorted[0].rank)) {
-    return {
-      type: 'FOUR_KIND',
-      label: `Tứ quý ${RANK_LABELS[sorted[0].rank]}`,
-      length: 4,
-      highCard: sorted[3],
-    };
-  }
-
-  // Straight: >= 3 consecutive ranks, no 2 (rank 15)
-  if (n >= 3 && sorted.every((c) => c.rank < 15)) {
-    let isStraight = true;
-    for (let i = 1; i < n; i++) {
-      if (sorted[i].rank !== sorted[i - 1].rank + 1) {
-        isStraight = false;
-        break;
-      }
-    }
-    if (isStraight) {
-      return {
-        type: 'STRAIGHT',
-        label: `Sảnh ${n} lá`,
-        length: n,
-        highCard: sorted[n - 1],
-      };
-    }
-  }
-
-  // Consecutive pairs (Đôi thông): 6 cards (3 pairs) or 8 cards (4 pairs), no 2
-  if ((n === 6 || n === 8) && sorted.every((c) => c.rank < 15)) {
-    let validPairs = true;
-    for (let i = 0; i < n; i += 2) {
-      if (sorted[i].rank !== sorted[i + 1].rank) {
-        validPairs = false;
-        break;
-      }
-      if (i > 0 && sorted[i].rank !== sorted[i - 2].rank + 1) {
-        validPairs = false;
-        break;
-      }
-    }
-    if (validPairs) {
-      return {
-        type: n === 6 ? 'PINE_3' : 'PINE_4',
-        label: n === 6 ? '3 Đôi thông' : '4 Đôi thông',
-        length: n,
-        highCard: sorted[n - 1],
-      };
-    }
-  }
-
-  return null;
-}
-
-function canBeat(next: Combo, prev: Combo | null): boolean {
-  if (!prev) return true;
-
-  // Special pig-chopping rules (Chặt heo / hàng)
-  if (prev.type === 'SINGLE' && prev.highCard.rank === 15) {
-    if (next.type === 'PINE_3' || next.type === 'FOUR_KIND' || next.type === 'PINE_4') {
-      return true;
-    }
-  }
-  if (prev.type === 'PAIR' && prev.highCard.rank === 15) {
-    if (next.type === 'FOUR_KIND' || next.type === 'PINE_4') {
-      return true;
-    }
-  }
-  if (prev.type === 'PINE_3' && (next.type === 'FOUR_KIND' || next.type === 'PINE_4')) {
-    return true;
-  }
-  if (prev.type === 'FOUR_KIND' && next.type === 'PINE_4') {
-    return true;
-  }
-
-  if (next.type !== prev.type) return false;
-  if (next.type === 'STRAIGHT' && next.length !== prev.length) return false;
-
-  return cardPower(next.highCard) > cardPower(prev.highCard);
-}
-
-// Find all valid plays from a hand that beat prevCombo
-function findValidMoves(hand: Card[], prev: Combo | null): Card[][] {
-  const sorted = sortCards(hand);
-  const candidates: Card[][] = [];
-
-  // Singles
-  for (const c of sorted) {
-    candidates.push([c]);
-  }
-
-  // Group by rank
-  const byRank = new Map<number, Card[]>();
-  for (const c of sorted) {
-    const arr = byRank.get(c.rank) || [];
-    arr.push(c);
-    byRank.set(c.rank, arr);
-  }
-
-  // Pairs, Triples, Quads
-  for (const [, group] of byRank) {
-    if (group.length >= 2) {
-      for (let i = 0; i < group.length; i++) {
-        for (let j = i + 1; j < group.length; j++) {
-          candidates.push([group[i], group[j]]);
-        }
-      }
-    }
-    if (group.length >= 3) {
-      candidates.push(group.slice(0, 3));
-    }
-    if (group.length === 4) {
-      candidates.push(group.slice(0, 4));
-    }
-  }
-
-  // Straights (length 3 to 12)
-  const uniqueRanks = Array.from(byRank.keys())
-    .filter((r) => r < 15)
-    .sort((a, b) => a - b);
-
-  for (let start = 0; start < uniqueRanks.length; start++) {
-    const seq: Card[] = [byRank.get(uniqueRanks[start])![0]];
-    for (let end = start + 1; end < uniqueRanks.length; end++) {
-      if (uniqueRanks[end] === uniqueRanks[end - 1] + 1) {
-        seq.push(byRank.get(uniqueRanks[end])![0]);
-        if (seq.length >= 3) {
-          // Also push variant using highest suit for last card if beating same length straight
-          candidates.push([...seq]);
-          const lastGroup = byRank.get(uniqueRanks[end])!;
-          if (lastGroup.length > 1) {
-            const altSeq = [...seq.slice(0, -1), lastGroup[lastGroup.length - 1]];
-            candidates.push(altSeq);
-          }
-        }
-      } else {
-        break;
-      }
-    }
-  }
-
-  // 3-pair pine
-  const pairRanks = uniqueRanks.filter((r) => (byRank.get(r)?.length ?? 0) >= 2);
-  for (let i = 0; i <= pairRanks.length - 3; i++) {
-    if (pairRanks[i + 1] === pairRanks[i] + 1 && pairRanks[i + 2] === pairRanks[i] + 2) {
-      candidates.push([
-        ...byRank.get(pairRanks[i])!.slice(0, 2),
-        ...byRank.get(pairRanks[i + 1])!.slice(0, 2),
-        ...byRank.get(pairRanks[i + 2])!.slice(0, 2),
-      ]);
-    }
-  }
-
-  return candidates.filter((cards) => {
-    const combo = analyzeCombo(cards);
-    return combo ? canBeat(combo, prev) : false;
-  });
-}
-
-function CardView({
+function CardFace({
   card,
   selected,
   onClick,
@@ -268,430 +61,529 @@ function CardView({
   onClick?: () => void;
   compact?: boolean;
 }) {
-  const isRed = card.suit === 2 || card.suit === 3;
-  const colorClass = isRed ? 'text-rose-600' : 'text-slate-900';
+  const isRed = card.suit === 'hearts' || card.suit === 'diamonds';
+  const label = RANK_LABELS[card.rank] || String(card.rank);
+  const symbol = SUIT_SYMBOL[card.suit];
 
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={!onClick}
-      className={`relative rounded-lg bg-white border border-slate-300 shadow-md select-none transition-transform duration-150 flex flex-col justify-between text-left ${
-        compact ? 'w-11 h-16 p-1' : 'w-12 h-[72px] sm:w-14 sm:h-20 p-1.5'
+      className={`relative select-none rounded-xl border font-bold transition-all flex flex-col justify-between bg-slate-50 shadow-md ${
+        compact ? 'w-11 h-16 p-1.5 text-xs' : 'w-14 h-20 sm:w-16 sm:h-24 p-2 text-sm'
       } ${
-        onClick ? 'cursor-pointer hover:-translate-y-1.5' : 'cursor-default'
-      } ${selected ? '-translate-y-3.5 ring-2 ring-amber-400 shadow-amber-500/30' : ''}`}
+        selected
+          ? '-translate-y-3 border-amber-400 ring-2 ring-amber-400 shadow-amber-500/30'
+          : 'border-slate-300 hover:-translate-y-1'
+      } ${isRed ? 'text-rose-600' : 'text-slate-900'} ${
+        onClick ? 'cursor-pointer' : 'cursor-default'
+      }`}
     >
-      <div className={`leading-none font-bold ${compact ? 'text-xs' : 'text-xs sm:text-sm'} ${colorClass}`}>
-        <div>{RANK_LABELS[card.rank]}</div>
-        <div className="text-[11px]">{SUIT_SYMBOLS[card.suit]}</div>
+      <div className="leading-none text-left">
+        <div>{label}</div>
+        <div className="text-[11px]">{symbol}</div>
       </div>
-      <div
-        className={`self-center leading-none ${compact ? 'text-base' : 'text-lg sm:text-xl'} ${colorClass}`}
-      >
-        {SUIT_SYMBOLS[card.suit]}
+      <div className={`text-center leading-none ${compact ? 'text-lg' : 'text-2xl'}`}>{symbol}</div>
+      <div className="leading-none text-right rotate-180">
+        <div className="text-[11px]">{label}</div>
       </div>
     </button>
   );
 }
 
 export function TienLenGame({
+  userId,
+  userName,
+  rooms,
+  connected,
+  sendEvent,
+  subscribe,
   onToast,
-}: {
-  onToast: (message: string, type?: 'info' | 'success' | 'warning') => void;
-}) {
-  const [hands, setHands] = useState<Card[][]>([[], [], [], []]);
+}: TienLenGameProps) {
+  const [activeRoom, setActiveRoom] = useState<GameRoomDetail | null>(null);
+  const activeRoomRef = useRef<GameRoomDetail | null>(null);
+  const [myHand, setMyHand] = useState<Card[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [currentTurn, setCurrentTurn] = useState<number>(0);
-  const [lastPlay, setLastPlay] = useState<{
-    playerIndex: number;
-    cards: Card[];
-    combo: Combo;
-  } | null>(null);
-  const [passedPlayers, setPassedPlayers] = useState<boolean[]>([false, false, false, false]);
-  const [winner, setWinner] = useState<number | null>(null);
-  const [statusLog, setStatusLog] = useState<string>('Bấm "Ván mới" hoặc đánh bài để bắt đầu!');
   const [soundEnabled, setSoundEnabled] = useState(true);
-  const [mustInclude3Spade, setMustInclude3Spade] = useState(false);
 
-  const startNewGame = useCallback(() => {
-    const deck = createShuffledDeck();
-    const dealt: Card[][] = [
-      sortCards(deck.slice(0, 13)),
-      sortCards(deck.slice(13, 26)),
-      sortCards(deck.slice(26, 39)),
-      sortCards(deck.slice(39, 52)),
-    ];
+  const [newRoomName, setNewRoomName] = useState('');
+  const [newMaxPlayers, setNewMaxPlayers] = useState(4);
+  const [isCreating, setIsCreating] = useState(false);
+  const [chatInput, setChatInput] = useState('');
 
-    // Whoever has 3♠ goes first
-    let starter = 0;
-    dealt.forEach((h, idx) => {
-      if (h.some((c) => c.rank === 3 && c.suit === 0)) {
-        starter = idx;
+  useEffect(() => {
+    activeRoomRef.current = activeRoom;
+  }, [activeRoom]);
+
+  useEffect(() => {
+    return subscribe((type, payload) => {
+      if (type === 'ws:reconnected') {
+        if (activeRoomRef.current) {
+          sendEvent('game:join', { roomId: activeRoomRef.current.id });
+        }
+        return;
+      }
+      if (type === 'game:room_state') {
+        const room = payload.room as GameRoomDetail | undefined;
+        if (!room || room.gameType !== 'tien-len') return;
+        const prevWinner = activeRoomRef.current?.winnerUserId;
+        setActiveRoom(room);
+        if (room.status === 'finished' && room.winnerUserId && room.winnerUserId !== prevWinner) {
+          if (soundEnabled) playWinSound();
+          onToast(`${room.winnerName} đã về nhất ván Tiến Lên!`, 'success');
+        }
+      } else if (type === 'game:private_hand') {
+        const rid = String(payload.roomId || '');
+        if (activeRoomRef.current && rid !== activeRoomRef.current.id) return;
+        const hand = Array.isArray(payload.hand) ? (payload.hand as Card[]) : [];
+        setMyHand(hand);
+        setSelectedIds((prev) => prev.filter((id) => hand.some((c) => c.id === id)));
+      } else if (type === 'game:error') {
+        onToast(String(payload.error || 'Không thể thực hiện nước đi.'), 'warning');
       }
     });
+  }, [subscribe, sendEvent, soundEnabled, onToast]);
 
-    setHands(dealt);
+  const handleJoinRoom = async (roomId: string) => {
+    try {
+      const res = await fetch(`/api/game-rooms/${encodeURIComponent(roomId)}/join`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, userName }),
+      });
+      const data = (await res.json()) as {
+        room?: GameRoomDetail;
+        hand?: Card[];
+        error?: string;
+      };
+      if (!res.ok || !data.room) {
+        onToast(data.error || 'Không vào được bàn chơi.', 'warning');
+        return;
+      }
+      setActiveRoom(data.room);
+      setMyHand(Array.isArray(data.hand) ? data.hand : []);
+      setSelectedIds([]);
+      sendEvent('game:join', { roomId: data.room.id });
+    } catch {
+      sendEvent('game:join', { roomId });
+    }
+  };
+
+  const handleCreateRoom = async () => {
+    setIsCreating(true);
+    try {
+      const res = await fetch('/api/game-rooms', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newRoomName.trim() || `Bàn Tiến Lên của ${userName}`,
+          gameType: 'tien-len',
+          maxPlayers: newMaxPlayers,
+          hostId: userId,
+          hostName: userName,
+        }),
+      });
+      const data = (await res.json()) as { room?: GameRoomSummary; error?: string };
+      if (!res.ok || !data.room) {
+        onToast(data.error || 'Không tạo được bàn mới.', 'warning');
+        return;
+      }
+      setNewRoomName('');
+      await handleJoinRoom(data.room.id);
+      onToast(`Đã mở bàn "${data.room.name}"!`, 'success');
+    } catch {
+      onToast('Lỗi kết nối khi tạo bàn chơi.', 'warning');
+    } finally {
+      setIsCreating(false);
+    }
+  };
+
+  const handleLeaveRoom = () => {
+    sendEvent('game:leave');
+    setActiveRoom(null);
+    setMyHand([]);
     setSelectedIds([]);
-    setCurrentTurn(starter);
-    setLastPlay(null);
-    setPassedPlayers([false, false, false, false]);
-    setWinner(null);
-    setMustInclude3Spade(true);
-    setStatusLog(
-      starter === 0
-        ? 'Bạn có 3♠ — bạn được quyền đánh trước!'
-        : `${PLAYER_NAMES[starter]} có 3♠ và đánh trước...`
+  };
+
+  const tienLenRooms = rooms.filter((r) => r.gameType === 'tien-len');
+
+  // --- LOBBY VIEW ---
+  if (!activeRoom) {
+    return (
+      <div className="rounded-2xl bg-[#111520] border border-slate-800/90 p-5 space-y-5 shadow-xl h-full flex flex-col">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-4">
+          <div className="flex items-center gap-2.5">
+            <span className="w-9 h-9 rounded-xl bg-emerald-500/15 border border-emerald-500/35 flex items-center justify-center text-emerald-400">
+              <Spade className="w-5 h-5" />
+            </span>
+            <div>
+              <h3 className="font-display text-lg font-bold text-slate-50">
+                Sảnh Bài Tiến Lên Miền Nam (Đấu Người Thật)
+              </h3>
+              <p className="text-xs text-slate-400">
+                Chọn bàn chơi hoặc mở phòng mới để thi đấu trực tiếp cùng các thành viên khác
+              </p>
+            </div>
+          </div>
+
+          <span className="text-xs font-mono text-emerald-400">
+            {connected ? 'Đang kết nối trực tuyến' : 'Đang đồng bộ...'}
+          </span>
+        </div>
+
+        {/* Create New Table */}
+        <div className="rounded-xl bg-slate-900/80 border border-slate-800 p-3.5 flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
+          <input
+            type="text"
+            value={newRoomName}
+            onChange={(e) => setNewRoomName(e.target.value)}
+            placeholder={`Tên bàn mới (VD: Bàn của ${userName})...`}
+            className="flex-1 h-9 px-3 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-emerald-500"
+          />
+          <select
+            value={newMaxPlayers}
+            onChange={(e) => setNewMaxPlayers(Number(e.target.value))}
+            className="h-9 px-2.5 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-100 focus:outline-none"
+          >
+            <option value={2}>2 người chơi</option>
+            <option value={3}>3 người chơi</option>
+            <option value={4}>4 người chơi</option>
+          </select>
+          <button
+            type="button"
+            onClick={handleCreateRoom}
+            disabled={isCreating}
+            className="h-9 px-4 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs inline-flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>{isCreating ? 'Đang tạo...' : 'Tạo Bàn Mới'}</span>
+          </button>
+        </div>
+
+        {/* Room List */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 flex-1">
+          {tienLenRooms.map((room) => (
+            <div
+              key={room.id}
+              className="rounded-xl bg-slate-900/70 border border-slate-800 p-4 flex flex-col justify-between gap-3 hover:border-emerald-500/40 transition-colors"
+            >
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between gap-2 text-xs">
+                  <span className="font-mono text-amber-300 font-semibold">Mã: {room.code}</span>
+                  <span
+                    className={`font-semibold ${
+                      room.status === 'playing' ? 'text-rose-400' : 'text-emerald-400'
+                    }`}
+                  >
+                    {room.status === 'playing' ? 'Đang đấu' : 'Đang mở bàn'}
+                  </span>
+                </div>
+                <p className="font-display text-sm font-bold text-slate-100 truncate">
+                  {room.name}
+                </p>
+                <p className="text-xs text-slate-400 truncate">
+                  {room.seats.length > 0
+                    ? `Trong bàn: ${room.seats.map((s) => s.userName).join(', ')}`
+                    : 'Bàn đang trống — Vào ngồi trước để mời bạn chơi!'}
+                </p>
+              </div>
+
+              <div className="pt-2.5 border-t border-slate-800 flex items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1.5 text-xs font-mono text-slate-300 tabular-nums">
+                  <Users className="w-3.5 h-3.5 text-emerald-400" />
+                  {room.playerCount}/{room.maxPlayers} người
+                </span>
+
+                <button
+                  type="button"
+                  onClick={() => handleJoinRoom(room.id)}
+                  className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs cursor-pointer"
+                >
+                  {room.status === 'playing' || room.playerCount >= room.maxPlayers
+                    ? 'Vào xem'
+                    : 'Vào bàn chơi'}
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
     );
-  }, []);
+  }
 
-  useEffect(() => {
-    startNewGame();
-  }, [startNewGame]);
-
-  const advanceTurn = useCallback(
-    (
-      nextHands: Card[][],
-      nextPassed: boolean[],
-      fromPlayer: number,
-      nextLastPlay: { playerIndex: number; cards: Card[]; combo: Combo } | null
-    ) => {
-      // Find next player who hasn't passed and still has cards
-      let candidate = (fromPlayer + 1) % 4;
-      for (let step = 0; step < 4; step++) {
-        if (!nextPassed[candidate] && nextHands[candidate].length > 0) {
-          break;
-        }
-        candidate = (candidate + 1) % 4;
-      }
-
-      // If turn returns to the player who made lastPlay, round resets!
-      if (nextLastPlay && candidate === nextLastPlay.playerIndex) {
-        setPassedPlayers([false, false, false, false]);
-        setLastPlay(null);
-        setCurrentTurn(candidate);
-        setStatusLog(`Cả bàn bỏ lượt! ${PLAYER_NAMES[candidate]} được tự do ra bài mới.`);
-      } else {
-        setPassedPlayers(nextPassed);
-        setLastPlay(nextLastPlay);
-        setCurrentTurn(candidate);
-      }
-    },
-    []
-  );
-
-  // Bot turn automation
-  useEffect(() => {
-    if (winner !== null || currentTurn === 0) return;
-
-    const timer = window.setTimeout(() => {
-      const botHand = hands[currentTurn];
-      if (botHand.length === 0) return;
-
-      let validMoves = findValidMoves(botHand, lastPlay ? lastPlay.combo : null);
-      if (mustInclude3Spade) {
-        const with3S = validMoves.filter((m) => m.some((c) => c.rank === 3 && c.suit === 0));
-        if (with3S.length > 0) validMoves = with3S;
-      }
-
-      if (validMoves.length === 0) {
-        // Bot passes
-        const nextPassed = [...passedPlayers];
-        nextPassed[currentTurn] = true;
-        setStatusLog(`${PLAYER_NAMES[currentTurn]} bỏ lượt.`);
-        advanceTurn(hands, nextPassed, currentTurn, lastPlay);
-        return;
-      }
-
-      // Prefer multi-card combos when leading freely, otherwise smallest winning play
-      let chosen = validMoves[0];
-      if (!lastPlay) {
-        const multi = validMoves.filter((m) => m.length >= 2);
-        if (multi.length > 0) {
-          multi.sort((a, b) => b.length - a.length || cardPower(a[0]) - cardPower(b[0]));
-          chosen = multi[0];
-        }
-      } else {
-        chosen = validMoves[0];
-      }
-
-      const combo = analyzeCombo(chosen)!;
-      const chosenIds = new Set(chosen.map((c) => c.id));
-      const updatedHand = botHand.filter((c) => !chosenIds.has(c.id));
-      const nextHands = hands.map((h, i) => (i === currentTurn ? updatedHand : h));
-
-      if (soundEnabled) playCardSound();
-      setHands(nextHands);
-      setMustInclude3Spade(false);
-
-      const newPlay = { playerIndex: currentTurn, cards: sortCards(chosen), combo };
-      setStatusLog(`${PLAYER_NAMES[currentTurn]} đánh ${combo.label}`);
-
-      if (updatedHand.length === 0) {
-        setLastPlay(newPlay);
-        setWinner(currentTurn);
-        if (soundEnabled) playWinSound();
-        onToast(`${PLAYER_NAMES[currentTurn]} đã về nhất ván Tiến Lên!`, 'info');
-        return;
-      }
-
-      advanceTurn(nextHands, passedPlayers, currentTurn, newPlay);
-    }, 700);
-
-    return () => window.clearTimeout(timer);
-  }, [currentTurn, hands, lastPlay, passedPlayers, winner, mustInclude3Spade, soundEnabled, advanceTurn, onToast]);
+  // --- INSIDE MULTIPLAYER TABLE ---
+  const mySeat = activeRoom.seats.find((s) => s.userId === userId);
+  const isMyTurn = activeRoom.status === 'playing' && activeRoom.turnUserId === userId;
+  const opponents = activeRoom.seats.filter((s) => s.userId !== userId);
 
   const toggleSelectCard = (id: string) => {
+    if (!isMyTurn) return;
     setSelectedIds((prev) =>
       prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
     );
   };
 
-  const selectedCards = hands[0].filter((c) => selectedIds.includes(c.id));
-  const selectedCombo = analyzeCombo(selectedCards);
-
-  const handlePlayerPlay = () => {
-    if (currentTurn !== 0 || winner !== null) return;
-    if (!selectedCombo) {
-      onToast('Bộ bài bạn chọn không hợp lệ!', 'warning');
-      return;
-    }
-    if (mustInclude3Spade && !selectedCards.some((c) => c.rank === 3 && c.suit === 0)) {
-      onToast('Lượt đầu tiên phải đánh kèm lá 3♠!', 'warning');
-      return;
-    }
-    if (!canBeat(selectedCombo, lastPlay ? lastPlay.combo : null)) {
-      onToast('Bài của bạn chưa đủ lớn để chặt bài trên bàn!', 'warning');
-      return;
-    }
-
-    const chosenSet = new Set(selectedIds);
-    const updatedHand = hands[0].filter((c) => !chosenSet.has(c.id));
-    const nextHands = hands.map((h, i) => (i === 0 ? updatedHand : h));
-
+  const handlePlaySelected = () => {
+    if (!isMyTurn || selectedIds.length === 0) return;
     if (soundEnabled) playCardSound();
-    setHands(nextHands);
+    sendEvent('game:play_cards', { cardIds: selectedIds });
     setSelectedIds([]);
-    setMustInclude3Spade(false);
-
-    const newPlay = { playerIndex: 0, cards: sortCards(selectedCards), combo: selectedCombo };
-    setStatusLog(`Bạn đã đánh ${selectedCombo.label}`);
-
-    if (updatedHand.length === 0) {
-      setLastPlay(newPlay);
-      setWinner(0);
-      if (soundEnabled) playWinSound();
-      onToast('Chúc mừng! Bạn đã về nhất Tiến Lên Miền Nam!', 'success');
-      return;
-    }
-
-    advanceTurn(nextHands, passedPlayers, 0, newPlay);
   };
 
-  const handlePlayerPass = () => {
-    if (currentTurn !== 0 || !lastPlay || winner !== null) return;
-    const nextPassed = [...passedPlayers];
-    nextPassed[0] = true;
+  const handlePass = () => {
+    if (!isMyTurn) return;
+    sendEvent('game:pass_turn');
     setSelectedIds([]);
-    setStatusLog('Bạn đã bỏ lượt.');
-    advanceTurn(hands, nextPassed, 0, lastPlay);
   };
 
-  const handleHint = () => {
-    if (currentTurn !== 0 || winner !== null) return;
-    let moves = findValidMoves(hands[0], lastPlay ? lastPlay.combo : null);
-    if (mustInclude3Spade) {
-      moves = moves.filter((m) => m.some((c) => c.rank === 3 && c.suit === 0));
-    }
-    if (moves.length === 0) {
-      onToast('Không có nước đi hợp lệ — bạn cần bấm Bỏ lượt.', 'warning');
-      return;
-    }
-    setSelectedIds(moves[0].map((c) => c.id));
-  };
-
-  const handleSortPlayerHand = () => {
-    setHands((prev) => prev.map((h, i) => (i === 0 ? sortCards(h) : h)));
+  const handleSendChat = () => {
+    const clean = chatInput.trim();
+    if (!clean) return;
+    sendEvent('game:chat', { text: clean });
+    setChatInput('');
   };
 
   return (
-    <div className="rounded-2xl overflow-hidden border border-emerald-900/60 bg-[#0B3B24] shadow-2xl flex flex-col h-[600px]">
-      {/* Table Top HUD */}
-      <div className="px-4 py-2.5 bg-[#082B1A] border-b border-emerald-900/70 flex flex-wrap items-center justify-between gap-2 shrink-0">
-        <div className="flex items-center gap-3">
-          <h3 className="font-display text-sm sm:text-base font-bold text-amber-300">
-            Tiến Lên Miền Nam
-          </h3>
-          <span className="text-xs text-emerald-200/80">4 Người chơi · Luật Chuẩn</span>
+    <div className="rounded-2xl bg-[#111520] border border-slate-800/90 overflow-hidden shadow-xl flex flex-col">
+      {/* Header */}
+      <div className="px-4 py-3 border-b border-slate-800 bg-slate-900/60 flex flex-wrap items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-xs text-emerald-400 font-semibold">
+            <Spade className="w-3.5 h-3.5" />
+            <span>{activeRoom.name}</span>
+            <span className="font-mono text-amber-300">#{activeRoom.code}</span>
+          </div>
+          <p className="text-[11px] text-slate-400 mt-0.5">
+            {activeRoom.status === 'waiting'
+              ? `Đang chờ đủ người chơi (${activeRoom.seats.length}/${activeRoom.maxPlayers})`
+              : activeRoom.status === 'finished'
+              ? `Ván kết thúc · ${activeRoom.winnerName} chiến thắng!`
+              : `Đang tới lượt: ${
+                  activeRoom.seats.find((s) => s.userId === activeRoom.turnUserId)?.userName || '...'
+                }`}
+          </p>
         </div>
 
         <div className="flex items-center gap-2">
           <button
             type="button"
             onClick={() => setSoundEnabled((v) => !v)}
-            className="p-1.5 rounded-lg bg-emerald-950/70 hover:bg-emerald-900 text-emerald-200 transition-colors cursor-pointer"
-            aria-label={soundEnabled ? 'Tắt âm thanh game' : 'Bật âm thanh game'}
+            className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer"
+            title="Bật/Tắt âm thanh"
           >
             {soundEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
           </button>
+
+          {!mySeat && activeRoom.status !== 'playing' && activeRoom.seats.length < activeRoom.maxPlayers && (
+            <button
+              type="button"
+              onClick={() => sendEvent('game:take_seat')}
+              className="px-3 py-1.5 rounded-lg bg-amber-500 text-slate-950 text-xs font-bold cursor-pointer"
+            >
+              Ngồi vào bàn
+            </button>
+          )}
+
+          {mySeat && activeRoom.status !== 'playing' && (
+            <button
+              type="button"
+              onClick={() => sendEvent('game:start')}
+              disabled={activeRoom.seats.length < 2}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-45 text-white text-xs font-bold cursor-pointer"
+            >
+              <Play className="w-3.5 h-3.5" />
+              <span>{activeRoom.status === 'finished' ? 'Chia ván mới' : 'Bắt đầu chia bài'}</span>
+            </button>
+          )}
+
           <button
             type="button"
-            onClick={startNewGame}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs transition-colors cursor-pointer"
+            onClick={handleLeaveRoom}
+            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-rose-600/25 hover:text-rose-300 text-slate-200 text-xs font-semibold cursor-pointer"
           >
-            <RotateCcw className="w-3.5 h-3.5" />
-            <span>Ván mới</span>
+            <LogOut className="w-3.5 h-3.5" />
+            <span>Rời bàn</span>
           </button>
         </div>
       </div>
 
-      {/* Card Table Surface */}
-      <div className="relative flex-1 flex flex-col justify-between p-3 sm:p-4 bg-[radial-gradient(circle_at_center,#125E3A_0%,#0A3621_100%)] overflow-hidden">
-        {/* Opponents Row */}
-        <div className="grid grid-cols-3 gap-2">
-          {[1, 2, 3].map((idx) => {
-            const isTurn = currentTurn === idx && winner === null;
-            const isPass = passedPlayers[idx];
+      {/* Table Felt */}
+      <div className="p-4 sm:p-5 bg-gradient-to-b from-[#0C261D] via-[#0B2019] to-[#0B111A] space-y-4">
+        {/* Seated Opponents */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+          {opponents.map((seat) => {
+            const isTurn = activeRoom.turnUserId === seat.userId;
             return (
               <div
-                key={idx}
-                className={`rounded-xl px-2.5 py-2 border transition-colors text-center ${
+                key={seat.userId}
+                className={`rounded-xl px-3 py-2 border flex items-center justify-between gap-2 ${
                   isTurn
-                    ? 'bg-amber-500/20 border-amber-400 text-amber-200'
-                    : 'bg-black/25 border-emerald-900/60 text-emerald-100'
+                    ? 'bg-amber-500/20 border-amber-400'
+                    : 'bg-slate-950/60 border-white/10'
                 }`}
               >
-                <p className="text-xs font-semibold truncate">{PLAYER_NAMES[idx]}</p>
-                <p className="font-mono text-xs tabular-nums mt-0.5 text-emerald-300">
-                  {hands[idx].length} lá {isPass ? '· Bỏ lượt' : isTurn ? '· Đang đánh' : ''}
-                </p>
+                <div className="min-w-0">
+                  <p className="text-xs font-bold text-slate-100 truncate">{seat.userName}</p>
+                  <p className="text-[11px] text-emerald-300">
+                    {seat.passed
+                      ? 'Đã bỏ lượt'
+                      : isTurn
+                      ? 'Đang suy nghĩ...'
+                      : 'Đang chờ lượt'}
+                  </p>
+                </div>
+                <span className="px-2 py-0.5 rounded bg-slate-900 font-mono text-xs font-bold text-amber-300 tabular-nums shrink-0">
+                  {activeRoom.status === 'playing' ? `${seat.cardCount ?? 0} lá` : 'Sẵn sàng'}
+                </span>
               </div>
             );
           })}
         </div>
 
-        {/* Center Battle Zone */}
-        <div className="my-auto flex flex-col items-center justify-center gap-2.5 py-3">
-          {lastPlay ? (
-            <>
-              <div className="flex items-center justify-center flex-wrap gap-1.5">
-                {lastPlay.cards.map((c) => (
-                  <CardView key={c.id} card={c} compact />
-                ))}
-              </div>
-              <p className="text-xs font-medium text-amber-200 bg-black/35 px-3 py-1 rounded-md">
-                {PLAYER_NAMES[lastPlay.playerIndex]}: {lastPlay.combo.label}
+        {/* Center Board */}
+        <div className="min-h-[155px] rounded-2xl border border-emerald-500/20 bg-black/25 p-4 flex flex-col items-center justify-center gap-3">
+          {activeRoom.status === 'waiting' ? (
+            <div className="text-center space-y-2 max-w-md">
+              <Clock className="w-7 h-7 text-amber-400 mx-auto" />
+              <p className="text-sm font-semibold text-slate-100">
+                {activeRoom.seats.length < 2
+                  ? `Đang chờ người chơi thật khác vào bàn (${activeRoom.seats.length}/${activeRoom.maxPlayers})`
+                  : 'Đã đủ người chơi! Hãy bấm "Bắt đầu chia bài" ở góc trên để chơi ngay.'}
               </p>
-            </>
-          ) : (
-            <div className="px-4 py-3 rounded-xl border border-dashed border-emerald-700/60 text-xs text-emerald-200/80 text-center">
-              Bàn trống — người tới lượt được đánh bộ bài bất kỳ
+              <p className="text-xs text-slate-400">
+                Mã bàn: <span className="font-mono text-amber-300 font-bold">{activeRoom.code}</span> ·
+                Có thể rủ bạn từ Chat Yahoo vào cùng bàn này.
+              </p>
             </div>
-          )}
-
-          <p className="text-xs text-emerald-100/90 text-center font-medium">{statusLog}</p>
-        </div>
-
-        {/* Player Controls & Hand */}
-        <div className="space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <span
-                className={`text-xs font-semibold px-2.5 py-1 rounded-md ${
-                  currentTurn === 0 && winner === null
-                    ? 'bg-amber-500 text-slate-950'
-                    : 'bg-black/35 text-emerald-200'
-                }`}
-              >
-                {currentTurn === 0 && winner === null
-                  ? 'Lượt của bạn'
-                  : winner !== null
-                    ? `${PLAYER_NAMES[winner]} Thắng!`
-                    : `Chờ ${PLAYER_NAMES[currentTurn]}...`}
-              </span>
-              {selectedCombo && (
-                <span className="text-xs text-amber-300 font-medium">
-                  Đã chọn: {selectedCombo.label}
-                </span>
+          ) : activeRoom.status === 'finished' ? (
+            <div className="text-center space-y-2">
+              <Trophy className="w-9 h-9 text-amber-400 mx-auto" />
+              <p className="font-display text-lg font-bold text-amber-300">
+                {activeRoom.winnerName} thắng ván này!
+              </p>
+              {mySeat && activeRoom.seats.length >= 2 && (
+                <button
+                  type="button"
+                  onClick={() => sendEvent('game:start')}
+                  className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold cursor-pointer"
+                >
+                  Chia bài ván mới
+                </button>
               )}
             </div>
-
-            <div className="flex flex-wrap items-center gap-1.5">
-              <button
-                type="button"
-                onClick={handleSortPlayerHand}
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-black/35 hover:bg-black/55 text-emerald-100 text-xs font-medium transition-colors cursor-pointer"
-              >
-                <ArrowUpDown className="w-3.5 h-3.5" />
-                <span>Xếp bài</span>
-              </button>
-              <button
-                type="button"
-                onClick={handleHint}
-                disabled={currentTurn !== 0 || winner !== null}
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-black/35 hover:bg-black/55 disabled:opacity-40 text-amber-300 text-xs font-medium transition-colors cursor-pointer"
-              >
-                <Sparkles className="w-3.5 h-3.5" />
-                <span>Gợi ý</span>
-              </button>
-              <button
-                type="button"
-                onClick={handlePlayerPass}
-                disabled={currentTurn !== 0 || !lastPlay || winner !== null}
-                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-rose-600/85 hover:bg-rose-500 disabled:opacity-35 text-white text-xs font-semibold transition-colors cursor-pointer"
-              >
-                <SkipForward className="w-3.5 h-3.5" />
-                <span>Bỏ lượt</span>
-              </button>
-              <button
-                type="button"
-                onClick={handlePlayerPlay}
-                disabled={currentTurn !== 0 || selectedIds.length === 0 || winner !== null}
-                className="px-3.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-slate-950 text-xs font-bold transition-colors cursor-pointer"
-              >
-                Đánh bài
-              </button>
+          ) : activeRoom.lastPlay ? (
+            <div className="space-y-2 text-center">
+              <p className="text-xs text-slate-300">
+                <span className="font-semibold text-amber-300">{activeRoom.lastPlay.userName}</span>{' '}
+                vừa đánh:
+              </p>
+              <div className="flex flex-wrap justify-center gap-1.5">
+                {activeRoom.lastPlay.cards.map((card) => (
+                  <CardFace key={`center-${card.id}`} card={card} compact />
+                ))}
+              </div>
             </div>
-          </div>
-
-          {/* Player 13-Card Fan */}
-          <div className="flex items-end justify-center flex-wrap gap-1 sm:gap-1.5 pt-3 pb-1 min-h-[92px]">
-            {hands[0].map((card) => (
-              <CardView
-                key={card.id}
-                card={card}
-                selected={selectedIds.includes(card.id)}
-                onClick={() => toggleSelectCard(card.id)}
-              />
-            ))}
-          </div>
+          ) : (
+            <p className="text-xs text-emerald-200/80 text-center">
+              {activeRoom.mustInclude3Spade
+                ? 'Ván mới! Người giữ lá 3♠ đánh mở màn đầu tiên.'
+                : 'Vòng mới tự do — người tới lượt đánh bộ bài bất kỳ!'}
+            </p>
+          )}
         </div>
 
-        {/* Victory Overlay */}
-        {winner !== null && (
-          <div className="absolute inset-0 bg-black/75 backdrop-blur-sm flex flex-col items-center justify-center p-6 text-center gap-4 z-20">
-            <div className="w-14 h-14 rounded-full bg-amber-500/20 border border-amber-400 flex items-center justify-center text-amber-400">
-              <Trophy className="w-7 h-7" />
+        {/* My Hand & Actions */}
+        {mySeat ? (
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-xs font-semibold text-slate-200">
+                Bài của bạn ({mySeat.userName}) —{' '}
+                {isMyTurn ? (
+                  <span className="text-amber-300 font-bold">ĐẾN LƯỢT BẠN!</span>
+                ) : (
+                  <span className="text-slate-400">
+                    {activeRoom.status === 'playing' ? 'Đang chờ đối thủ...' : `${myHand.length} lá`}
+                  </span>
+                )}
+              </span>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSelectedIds([])}
+                  disabled={selectedIds.length === 0}
+                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-xs text-slate-200 cursor-pointer"
+                >
+                  Bỏ chọn
+                </button>
+                <button
+                  type="button"
+                  onClick={handlePass}
+                  disabled={!isMyTurn || !activeRoom.lastPlay}
+                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-xs font-semibold text-rose-300 cursor-pointer"
+                >
+                  Bỏ lượt
+                </button>
+                <button
+                  type="button"
+                  onClick={handlePlaySelected}
+                  disabled={!isMyTurn || selectedIds.length === 0}
+                  className="px-4 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-slate-950 text-xs font-bold cursor-pointer"
+                >
+                  Đánh bài ({selectedIds.length})
+                </button>
+              </div>
             </div>
-            <div>
-              <h4 className="font-display text-2xl font-bold text-white">
-                {winner === 0 ? 'Bạn Đã Thắng!' : `${PLAYER_NAMES[winner]} Về Nhất!`}
-              </h4>
-              <p className="text-sm text-slate-300 mt-1">
-                {winner === 0
-                  ? 'Quá đỉnh! Hãy làm thêm ván nữa hoặc quay lại cầm mic nhé.'
-                  : 'Chút nữa thôi! Chia bài lại làm ván mới phục thù nào.'}
-              </p>
+
+            <div className="flex flex-wrap justify-center gap-1.5 sm:gap-2 pt-3 pb-1 min-h-[104px]">
+              {myHand.map((card) => (
+                <CardFace
+                  key={card.id}
+                  card={card}
+                  selected={selectedIds.includes(card.id)}
+                  onClick={() => toggleSelectCard(card.id)}
+                />
+              ))}
             </div>
-            <button
-              type="button"
-              onClick={startNewGame}
-              className="px-5 py-2.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm transition-colors cursor-pointer"
-            >
-              Chơi ván mới
-            </button>
+          </div>
+        ) : (
+          <div className="text-center py-2 text-xs text-slate-400 flex items-center justify-center gap-1.5">
+            <Eye className="w-3.5 h-3.5" />
+            <span>Bạn đang xem trực tiếp bàn đấu ({activeRoom.spectators.length} khán giả)</span>
           </div>
         )}
+      </div>
+
+      {/* Table Live Chat */}
+      <div className="border-t border-slate-800 bg-slate-950/60 p-3 space-y-2">
+        <div className="max-h-24 overflow-y-auto custom-scrollbar space-y-1 text-xs">
+          {activeRoom.chat.map((c) => (
+            <div key={c.id}>
+              <span className="font-mono text-[10px] text-slate-500 mr-1.5">[{c.timestamp}]</span>
+              <span className="font-semibold text-emerald-300 mr-1">{c.sender}:</span>
+              <span className="text-slate-200">{c.text}</span>
+            </div>
+          ))}
+        </div>
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={chatInput}
+            onChange={(e) => setChatInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleSendChat()}
+            placeholder="Chat với người chơi trong bàn..."
+            className="flex-1 h-8 px-3 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-emerald-500"
+          />
+          <button
+            type="button"
+            onClick={handleSendChat}
+            className="px-3 h-8 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold inline-flex items-center gap-1 cursor-pointer"
+          >
+            <Send className="w-3 h-3" />
+            <span>Gửi</span>
+          </button>
+        </div>
       </div>
     </div>
   );

@@ -1260,7 +1260,7 @@ export function LiveRoomView({
             {showSongPicker && (
               <div className="rounded-xl bg-slate-900/90 border border-slate-700 p-3 space-y-2.5">
                 <div className="flex items-center justify-between text-xs text-slate-400">
-                  <span>Tìm nhạc Karaoke trực tiếp trên YouTube (không cần API) hoặc dán link:</span>
+                  <span>Tìm nhạc Karaoke trực tiếp trên YouTube hoặc dán link:</span>
                   {isSearchingRoomYt && <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" />}
                 </div>
                 <input

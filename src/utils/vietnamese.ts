@@ -43,6 +43,65 @@ export function formatTime(seconds: number): string {
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 }
 
+export function slugifyTitle(title: string): string {
+  const clean = removeVietnameseTones(title)
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64)
+    .replace(/-+$/, '');
+  return clean || 'bai-hat';
+}
+
+export function buildSongUrlPath(title: string, youtubeId: string, kind: 'karaoke' | 'mp3'): string {
+  let slug = slugifyTitle(title);
+  if (kind === 'karaoke' && !slug.includes('karaoke')) {
+    slug = `${slug}-karaoke`;
+  } else if (kind === 'mp3' && !slug.includes('mp3')) {
+    slug = `${slug}-mp3`;
+  }
+  return `/${slug}-${youtubeId}`;
+}
+
+export function parseMediaUrlPath(
+  pathname: string
+): { youtubeId: string; kind: 'karaoke' | 'mp3'; rawSlug: string } | null {
+  const cleanPath = pathname.replace(/^\/+|\/+$/g, '');
+  if (!cleanPath || cleanPath.startsWith('api/')) return null;
+  const match = cleanPath.match(/^(.*)-([a-zA-Z0-9_-]{11})$/);
+  if (!match) return null;
+  const rawSlug = match[1];
+  const youtubeId = match[2];
+  const kind: 'karaoke' | 'mp3' = rawSlug.endsWith('-mp3') || rawSlug.includes('-mp3-') ? 'mp3' : 'karaoke';
+  return { youtubeId, kind, rawSlug };
+}
+
+export function updateDocumentSeo(opts: {
+  title: string;
+  description: string;
+  path?: string;
+}): void {
+  if (typeof document === 'undefined') return;
+  document.title = opts.title;
+
+  const setMeta = (selector: string, content: string) => {
+    const el = document.querySelector(selector);
+    if (el) el.setAttribute('content', content);
+  };
+  setMeta('meta[name="description"]', opts.description);
+  setMeta('meta[property="og:title"]', opts.title);
+  setMeta('meta[property="og:description"]', opts.description);
+
+  if (opts.path && typeof window !== 'undefined') {
+    try {
+      if (window.location.pathname !== opts.path) {
+        window.history.replaceState(null, '', opts.path);
+      }
+    } catch {
+      // Ignore restricted history frames
+    }
+  }
+}
+
 // Web Audio API Sound Effects (Zero external audio dependencies)
 let sharedAudioCtx: AudioContext | null = null;
 

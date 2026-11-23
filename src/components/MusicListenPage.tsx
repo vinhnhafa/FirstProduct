@@ -24,13 +24,27 @@ import {
   X,
   Share2,
   Youtube,
+  Smartphone,
 } from 'lucide-react';
 import { ListeningHistoryItem, MusicTrack } from '../types/karaoke';
 import { MUSIC_GENRES, STARTER_MUSIC_TRACKS } from '../data/musicCatalog';
-import { extractYouTubeId, formatTime, removeVietnameseTones } from '../utils/vietnamese';
+import {
+  buildSongUrlPath,
+  extractYouTubeId,
+  formatTime,
+  removeVietnameseTones,
+  updateDocumentSeo,
+} from '../utils/vietnamese';
+import {
+  startBackgroundAudioKeepAlive,
+  stopBackgroundAudioKeepAlive,
+  syncMediaSession,
+  toggleScreenWakeLock,
+} from '../utils/backgroundAudio';
 
 interface MusicListenPageProps {
   blockedYoutubeIds: Set<string>;
+  initialYoutubeId?: string | null;
   onReportBrokenVideo: (youtubeId: string, title: string) => void;
   onSearchKaraokeVersion: (title: string) => void;
   onToast: (message: string, type?: 'info' | 'success' | 'warning') => void;
@@ -81,6 +95,7 @@ function formatHistoryTime(ts: number): string {
 
 export function MusicListenPage({
   blockedYoutubeIds,
+  initialYoutubeId,
   onReportBrokenVideo,
   onSearchKaraokeVersion,
   onToast,
@@ -93,7 +108,21 @@ export function MusicListenPage({
   // Dynamic YouTube tracks + current player state
   const [liveTracks, setLiveTracks] = useState<MusicTrack[]>([]);
   const [isLoadingYt, setIsLoadingYt] = useState(false);
-  const [currentTrack, setCurrentTrack] = useState<MusicTrack>(STARTER_MUSIC_TRACKS[0]);
+  const [currentTrack, setCurrentTrack] = useState<MusicTrack>(() => {
+    if (initialYoutubeId) {
+      const matched = STARTER_MUSIC_TRACKS.find((t) => t.youtubeId === initialYoutubeId);
+      if (matched) return matched;
+      return {
+        id: `yt-${initialYoutubeId}`,
+        youtubeId: initialYoutubeId,
+        title: `Đang tải bài hát (${initialYoutubeId})`,
+        artist: 'YouTube MP3',
+        genre: 'Nhạc Trẻ Hot',
+        durationSeconds: 240,
+      };
+    }
+    return STARTER_MUSIC_TRACKS[0];
+  });
   const [upNextQueue, setUpNextQueue] = useState<MusicTrack[]>([]);
   const [autoplayNext, setAutoplayNext] = useState<boolean>(() => {
     try {
@@ -104,6 +133,7 @@ export function MusicListenPage({
   });
   const [repeatOne, setRepeatOne] = useState(false);
   const [expandVideo, setExpandVideo] = useState(false);
+  const [wakeLockActive, setWakeLockActive] = useState(false);
 
   // Listening History & Favorites
   const [history, setHistory] = useState<ListeningHistoryItem[]>(loadHistory);
@@ -136,10 +166,52 @@ export function MusicListenPage({
   const currentTrackRef = useRef<MusicTrack>(currentTrack);
   const repeatOneRef = useRef(repeatOne);
   const autoplayNextRef = useRef(autoplayNext);
+  const wantPlayingRef = useRef(false);
+  const currentTimeRef = useRef(0);
 
   useEffect(() => {
     currentTrackRef.current = currentTrack;
   }, [currentTrack]);
+
+  useEffect(() => {
+    currentTimeRef.current = currentTime;
+  }, [currentTime]);
+
+  // Resolve shared MP3 URL track metadata on mount if initialYoutubeId is not in starter catalog
+  useEffect(() => {
+    if (!initialYoutubeId) return;
+    if (STARTER_MUSIC_TRACKS.some((t) => t.youtubeId === initialYoutubeId)) return;
+    let active = true;
+    fetch(`/api/youtube/oembed?id=${encodeURIComponent(initialYoutubeId)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: { title?: string; artist?: string } | null) => {
+        if (!active || !d?.title) return;
+        setCurrentTrack((prev) =>
+          prev.youtubeId === initialYoutubeId
+            ? {
+                ...prev,
+                title: d.title || prev.title,
+                artist: d.artist || prev.artist,
+              }
+            : prev
+        );
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [initialYoutubeId]);
+
+  // Sync MP3 SEO title, meta description (with "mp3"), and song-name-before-id URL
+  useEffect(() => {
+    const cleanTitle = currentTrack.title;
+    const displayTitle = cleanTitle.toLowerCase().includes('mp3')
+      ? `${cleanTitle} | Điệp Khúc Online`
+      : `${cleanTitle} MP3 | Điệp Khúc Online`;
+    const description = `Nghe nhạc mp3 trực tuyến ${cleanTitle} - ${currentTrack.artist} (${currentTrack.genre}). Lưu lịch sử bài hát đã nghe và hỗ trợ nghe nhạc nền khi tắt màn hình điện thoại.`;
+    const path = buildSongUrlPath(cleanTitle, currentTrack.youtubeId, 'mp3');
+    updateDocumentSeo({ title: displayTitle, description, path });
+  }, [currentTrack.title, currentTrack.artist, currentTrack.genre, currentTrack.youtubeId]);
 
   useEffect(() => {
     repeatOneRef.current = repeatOne;
@@ -293,6 +365,8 @@ export function MusicListenPage({
         onToast('Video này không khả dụng để phát nhúng.', 'warning');
         return;
       }
+      wantPlayingRef.current = true;
+      startBackgroundAudioKeepAlive();
       setCurrentTrack(track);
       setCurrentTime(0);
       setDuration(track.durationSeconds || 240);
@@ -383,18 +457,40 @@ export function MusicListenPage({
           onStateChange: (e) => {
             if (!mounted) return;
             if (e.data === 1) {
+              wantPlayingRef.current = true;
+              startBackgroundAudioKeepAlive();
               setIsPlaying(true);
               const d = e.target.getDuration?.();
               if (d && d > 0) setDuration(d);
             } else if (e.data === 2) {
-              setIsPlaying(false);
+              if (document.visibilityState === 'hidden' && wantPlayingRef.current) {
+                // Keep playing in mobile background / screen-off mode
+                window.setTimeout(() => {
+                  if (mounted && wantPlayingRef.current) {
+                    try {
+                      e.target.playVideo();
+                    } catch {
+                      // Ignore
+                    }
+                  }
+                }, 120);
+              } else {
+                wantPlayingRef.current = false;
+                stopBackgroundAudioKeepAlive();
+                setIsPlaying(false);
+              }
             } else if (e.data === 0) {
               setIsPlaying(false);
               if (repeatOneRef.current) {
+                wantPlayingRef.current = true;
+                startBackgroundAudioKeepAlive();
                 e.target.seekTo(0, true);
                 e.target.playVideo();
               } else if (autoplayNextRef.current) {
                 handleNextTrackRef.current();
+              } else {
+                wantPlayingRef.current = false;
+                stopBackgroundAudioKeepAlive();
               }
             }
           },
@@ -424,6 +520,36 @@ export function MusicListenPage({
       }
     }
 
+    const handleVisibilityChange = () => {
+      if (
+        document.visibilityState === 'hidden' &&
+        wantPlayingRef.current &&
+        ytReadyRef.current &&
+        ytPlayerRef.current
+      ) {
+        startBackgroundAudioKeepAlive();
+        window.setTimeout(() => {
+          if (wantPlayingRef.current) {
+            try {
+              ytPlayerRef.current?.playVideo();
+            } catch {
+              // Ignore
+            }
+          }
+        }, 160);
+        window.setTimeout(() => {
+          if (wantPlayingRef.current) {
+            try {
+              ytPlayerRef.current?.playVideo();
+            } catch {
+              // Ignore
+            }
+          }
+        }, 480);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
     const timer = window.setInterval(() => {
       if (!ytReadyRef.current || !ytPlayerRef.current) return;
       try {
@@ -440,6 +566,9 @@ export function MusicListenPage({
       mounted = false;
       ytReadyRef.current = false;
       window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      stopBackgroundAudioKeepAlive();
+      toggleScreenWakeLock(false).catch(() => {});
       try {
         ytPlayerRef.current?.destroy();
       } catch {
@@ -450,18 +579,67 @@ export function MusicListenPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleTogglePlay = () => {
+  const handleTogglePlay = useCallback(() => {
     if (!ytReadyRef.current || !ytPlayerRef.current) return;
     if (isPlaying) {
+      wantPlayingRef.current = false;
+      stopBackgroundAudioKeepAlive();
       ytPlayerRef.current.pauseVideo();
+      setIsPlaying(false);
     } else {
-      // Ensure first play also logs into listening history if not yet recorded in this session
+      wantPlayingRef.current = true;
+      startBackgroundAudioKeepAlive();
       if (history.length === 0 || history[0].youtubeId !== currentTrack.youtubeId) {
         recordHistory(currentTrack);
       }
       ytPlayerRef.current.playVideo();
     }
-  };
+  }, [currentTrack, history, isPlaying, recordHistory]);
+
+  const handleSeek = useCallback((sec: number) => {
+    setCurrentTime(sec);
+    if (ytReadyRef.current && ytPlayerRef.current) {
+      ytPlayerRef.current.seekTo(sec, true);
+    }
+  }, []);
+
+  // Keep Mobile Lock-Screen Media Session synchronized
+  useEffect(() => {
+    syncMediaSession({
+      title: currentTrack.title,
+      artist: currentTrack.artist,
+      album: `${currentTrack.genre} · Điệp Khúc Online MP3`,
+      youtubeId: currentTrack.youtubeId,
+      isPlaying,
+      durationSeconds: duration,
+      positionSeconds: currentTimeRef.current,
+      onPlay: () => {
+        wantPlayingRef.current = true;
+        startBackgroundAudioKeepAlive();
+        ytPlayerRef.current?.playVideo();
+        setIsPlaying(true);
+      },
+      onPause: () => {
+        wantPlayingRef.current = false;
+        stopBackgroundAudioKeepAlive();
+        ytPlayerRef.current?.pauseVideo();
+        setIsPlaying(false);
+      },
+      onPrev: handlePrevTrack,
+      onNext: handleNextTrack,
+      onSeekTo: handleSeek,
+    });
+  }, [
+    currentTrack.title,
+    currentTrack.artist,
+    currentTrack.genre,
+    currentTrack.youtubeId,
+    isPlaying,
+    duration,
+    handlePrevTrack,
+    handleNextTrack,
+    handleSeek,
+  ]);
 
   const handleVolumeChange = (val: number) => {
     setVolume(val);
@@ -485,10 +663,17 @@ export function MusicListenPage({
     }
   };
 
-  const handleSeek = (sec: number) => {
-    setCurrentTime(sec);
-    if (ytReadyRef.current && ytPlayerRef.current) {
-      ytPlayerRef.current.seekTo(sec, true);
+  const handleToggleWakeLock = async () => {
+    const next = !wakeLockActive;
+    const granted = await toggleScreenWakeLock(next);
+    setWakeLockActive(next && granted);
+    if (next && granted) {
+      onToast('Đã bật giữ phiên phát ổn định trên điện thoại.', 'success');
+    } else if (next) {
+      startBackgroundAudioKeepAlive();
+      onToast('Đã kích hoạt chế độ phát nền & điều khiển màn hình khóa.', 'info');
+    } else {
+      onToast('Đã tắt chế độ giữ màn hình.', 'info');
     }
   };
 
@@ -555,10 +740,10 @@ export function MusicListenPage({
             </span>
             <div>
               <h1 className="font-display text-base sm:text-lg font-bold tracking-tight text-amber-300 uppercase">
-                Nghe Nhạc YouTube Tuyển Chọn
+                Nghe Nhạc MP3 YouTube Tuyển Chọn
               </h1>
               <p className="text-[11px] text-purple-200/80">
-                Đầy đủ thể loại · Chọn Nhạc Hot & Mới · Tự lưu lịch sử đã nghe
+                Đầy đủ thể loại · Nhạc Hot & Mới · Hỗ trợ nghe nền khi tắt màn hình điện thoại
               </p>
             </div>
           </div>
@@ -858,14 +1043,39 @@ export function MusicListenPage({
                 <button
                   type="button"
                   onClick={() => {
-                    const shareText = `Đang nghe "${currentTrack.title}" trên Điệp Khúc Online: https://youtu.be/${currentTrack.youtubeId}`;
+                    const songUrl = `${window.location.origin}${buildSongUrlPath(
+                      currentTrack.title,
+                      currentTrack.youtubeId,
+                      'mp3'
+                    )}`;
+                    const shareText = `Đang nghe "${currentTrack.title}" MP3 trên Điệp Khúc Online: ${songUrl}`;
                     navigator.clipboard?.writeText(shareText).catch(() => {});
-                    onToast('Đã sao chép link bài hát để chia sẻ!', 'success');
+                    onToast('Đã sao chép link bài hát MP3 để chia sẻ!', 'success');
                   }}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-medium cursor-pointer"
                 >
                   <Share2 className="w-3.5 h-3.5 text-sky-400" />
-                  <span>Chia sẻ</span>
+                  <span>Chia sẻ link MP3</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleToggleWakeLock}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border font-medium cursor-pointer ${
+                    wakeLockActive || isPlaying
+                      ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
+                      : 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-200'
+                  }`}
+                  title="Kích hoạt điều khiển màn hình khóa & giữ phát nhạc nền trên điện thoại"
+                >
+                  <Smartphone className="w-3.5 h-3.5" />
+                  <span>
+                    {wakeLockActive
+                      ? 'Đang giữ phát ổn định'
+                      : isPlaying
+                        ? 'Nghe nền tắt màn hình: Sẵn sàng'
+                        : 'Chế độ nghe tắt màn hình'}
+                  </span>
                 </button>
               </div>
 

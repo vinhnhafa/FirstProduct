@@ -1,355 +1,408 @@
-import { useState, useCallback, useEffect } from 'react';
-import { RotateCcw, Undo2, Users, Cpu, Trophy } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import {
+  Grid3X3,
+  Users,
+  Plus,
+  LogOut,
+  Play,
+  Volume2,
+  VolumeX,
+  Trophy,
+  Send,
+  Eye,
+  Clock,
+} from 'lucide-react';
+import { GameRoomDetail, GameRoomSummary } from '../types/karaoke';
+import { WsListener } from '../hooks/useRealtimeSocket';
 import { playStoneSound, playWinSound } from '../utils/vietnamese';
 
-type Cell = 'X' | 'O' | null;
-type Mode = 'ai' | 'pvp';
-
-const BOARD_SIZE = 15;
-
-interface MoveRecord {
-  row: number;
-  col: number;
-  player: 'X' | 'O';
-}
-
-function createEmptyBoard(): Cell[][] {
-  return Array.from({ length: BOARD_SIZE }, () => Array<Cell>(BOARD_SIZE).fill(null));
-}
-
-function checkWinner(board: Cell[][]): { winner: 'X' | 'O'; line: [number, number][] } | null {
-  const dirs = [
-    [0, 1],
-    [1, 0],
-    [1, 1],
-    [1, -1],
-  ];
-
-  for (let r = 0; r < BOARD_SIZE; r++) {
-    for (let c = 0; c < BOARD_SIZE; c++) {
-      const player = board[r][c];
-      if (!player) continue;
-      for (const [dr, dc] of dirs) {
-        const line: [number, number][] = [[r, c]];
-        for (let k = 1; k < 5; k++) {
-          const nr = r + dr * k;
-          const nc = c + dc * k;
-          if (
-            nr >= 0 &&
-            nr < BOARD_SIZE &&
-            nc >= 0 &&
-            nc < BOARD_SIZE &&
-            board[nr][nc] === player
-          ) {
-            line.push([nr, nc]);
-          } else {
-            break;
-          }
-        }
-        if (line.length === 5) {
-          return { winner: player, line };
-        }
-      }
-    }
-  }
-  return null;
-}
-
-// Heuristic line scorer for smart Gomoku AI
-function evaluatePoint(board: Cell[][], r: number, c: number, player: 'X' | 'O'): number {
-  const dirs = [
-    [0, 1],
-    [1, 0],
-    [1, 1],
-    [1, -1],
-  ];
-  let total = 0;
-
-  for (const [dr, dc] of dirs) {
-    let count = 1;
-    let openEnds = 0;
-
-    for (const sign of [-1, 1]) {
-      for (let step = 1; step <= 4; step++) {
-        const nr = r + dr * step * sign;
-        const nc = c + dc * step * sign;
-        if (nr < 0 || nr >= BOARD_SIZE || nc < 0 || nc >= BOARD_SIZE) break;
-        if (board[nr][nc] === player) {
-          count++;
-        } else if (board[nr][nc] === null) {
-          openEnds++;
-          break;
-        } else {
-          break;
-        }
-      }
-    }
-
-    if (count >= 5) total += 100000;
-    else if (count === 4 && openEnds === 2) total += 15000;
-    else if (count === 4 && openEnds === 1) total += 3500;
-    else if (count === 3 && openEnds === 2) total += 1500;
-    else if (count === 3 && openEnds === 1) total += 300;
-    else if (count === 2 && openEnds === 2) total += 120;
-    else if (count === 2 && openEnds === 1) total += 25;
-    else total += 5;
-  }
-
-  return total;
-}
-
-function chooseBestAiMove(board: Cell[][]): [number, number] {
-  const candidates: [number, number][] = [];
-  for (let r = 0; r < BOARD_SIZE; r++) {
-    for (let c = 0; c < BOARD_SIZE; c++) {
-      if (board[r][c] !== null) continue;
-      // Only consider cells within distance 2 of existing pieces
-      let hasNeighbor = false;
-      for (let dr = -2; dr <= 2 && !hasNeighbor; dr++) {
-        for (let dc = -2; dc <= 2; dc++) {
-          const nr = r + dr;
-          const nc = c + dc;
-          if (
-            nr >= 0 &&
-            nr < BOARD_SIZE &&
-            nc >= 0 &&
-            nc < BOARD_SIZE &&
-            board[nr][nc] !== null
-          ) {
-            hasNeighbor = true;
-            break;
-          }
-        }
-      }
-      if (hasNeighbor) candidates.push([r, c]);
-    }
-  }
-
-  if (candidates.length === 0) return [7, 7];
-
-  let bestScore = -1;
-  let bestMove = candidates[0];
-
-  for (const [r, c] of candidates) {
-    const attack = evaluatePoint(board, r, c, 'O') * 1.1;
-    const defense = evaluatePoint(board, r, c, 'X');
-    const centerBias = 7 - (Math.abs(r - 7) + Math.abs(c - 7)) * 0.1;
-    const score = Math.max(attack, defense) + (attack + defense) * 0.25 + centerBias;
-    if (score > bestScore) {
-      bestScore = score;
-      bestMove = [r, c];
-    }
-  }
-
-  return bestMove;
+interface CaroGameProps {
+  userId: string;
+  userName: string;
+  rooms: GameRoomSummary[];
+  connected: boolean;
+  sendEvent: (type: string, payload?: Record<string, unknown>) => void;
+  subscribe: (listener: WsListener) => () => void;
+  onToast: (message: string, type?: 'info' | 'success' | 'warning') => void;
 }
 
 export function CaroGame({
+  userId,
+  userName,
+  rooms,
+  connected,
+  sendEvent,
+  subscribe,
   onToast,
-}: {
-  onToast: (message: string, type?: 'info' | 'success' | 'warning') => void;
-}) {
-  const [board, setBoard] = useState<Cell[][]>(createEmptyBoard);
-  const [mode, setMode] = useState<Mode>('ai');
-  const [turn, setTurn] = useState<'X' | 'O'>('X');
-  const [history, setHistory] = useState<MoveRecord[]>([]);
-  const [winInfo, setWinInfo] = useState<{ winner: 'X' | 'O'; line: [number, number][] } | null>(
-    null
-  );
-  const [isDraw, setIsDraw] = useState(false);
-  const [scores, setScores] = useState({ X: 0, O: 0, draw: 0 });
+}: CaroGameProps) {
+  const [activeRoom, setActiveRoom] = useState<GameRoomDetail | null>(null);
+  const activeRoomRef = useRef<GameRoomDetail | null>(null);
+  const [soundEnabled, setSoundEnabled] = useState(true);
 
-  const resetGame = useCallback((nextMode?: Mode) => {
-    setBoard(createEmptyBoard());
-    setTurn('X');
-    setHistory([]);
-    setWinInfo(null);
-    setIsDraw(false);
-    if (nextMode) setMode(nextMode);
-  }, []);
+  const [newRoomName, setNewRoomName] = useState('');
+  const [isCreating, setIsCreating] = useState(false);
+  const [chatInput, setChatInput] = useState('');
 
-  const applyMove = useCallback(
-    (r: number, c: number, player: 'X' | 'O', currentBoard: Cell[][]) => {
-      const nextBoard = currentBoard.map((row, ri) =>
-        ri === r ? row.map((cell, ci) => (ci === c ? player : cell)) : row
-      );
-      setBoard(nextBoard);
-      setHistory((prev) => [...prev, { row: r, col: c, player }]);
-      playStoneSound(player === 'X');
-
-      const result = checkWinner(nextBoard);
-      if (result) {
-        setWinInfo(result);
-        setScores((prev) => ({ ...prev, [result.winner]: prev[result.winner] + 1 }));
-        playWinSound();
-        onToast(
-          mode === 'ai'
-            ? result.winner === 'X'
-              ? 'Bạn đã chiến thắng Cờ Caro!'
-              : 'Máy (O) đã thắng ván Caro này!'
-            : `Người chơi ${result.winner} đã chiến thắng Cờ Caro!`,
-          result.winner === 'X' ? 'success' : 'info'
-        );
-        return;
-      }
-
-      const full = nextBoard.every((row) => row.every((cell) => cell !== null));
-      if (full) {
-        setIsDraw(true);
-        setScores((prev) => ({ ...prev, draw: prev.draw + 1 }));
-        onToast('Ván Cờ Caro kết thúc hòa!', 'info');
-        return;
-      }
-
-      setTurn(player === 'X' ? 'O' : 'X');
-    },
-    [mode, onToast]
-  );
-
-  // Trigger AI move when mode === 'ai' and turn === 'O'
   useEffect(() => {
-    if (mode !== 'ai' || turn !== 'O' || winInfo || isDraw) return;
-    const timer = window.setTimeout(() => {
-      const [r, c] = chooseBestAiMove(board);
-      applyMove(r, c, 'O', board);
-    }, 320);
-    return () => window.clearTimeout(timer);
-  }, [mode, turn, winInfo, isDraw, board, applyMove]);
+    activeRoomRef.current = activeRoom;
+  }, [activeRoom]);
 
-  const handleCellClick = (r: number, c: number) => {
-    if (winInfo || isDraw || board[r][c] !== null) return;
-    if (mode === 'ai' && turn === 'O') return;
-    applyMove(r, c, turn, board);
-  };
+  useEffect(() => {
+    return subscribe((type, payload) => {
+      if (type === 'ws:reconnected') {
+        if (activeRoomRef.current) {
+          sendEvent('game:join', { roomId: activeRoomRef.current.id });
+        }
+        return;
+      }
+      if (type === 'game:room_state') {
+        const room = payload.room as GameRoomDetail | undefined;
+        if (!room || room.gameType !== 'caro') return;
 
-  const handleUndo = () => {
-    if (history.length === 0 || winInfo || isDraw) return;
-    const stepsToUndo = mode === 'ai' && turn === 'X' && history.length >= 2 ? 2 : 1;
-    const trimmed = history.slice(0, history.length - stepsToUndo);
-    const rebuilt = createEmptyBoard();
-    for (const m of trimmed) {
-      rebuilt[m.row][m.col] = m.player;
+        const prevLast = activeRoomRef.current?.caroLastMove;
+        const prevWinner = activeRoomRef.current?.winnerUserId;
+        setActiveRoom(room);
+
+        if (soundEnabled && room.caroLastMove !== null && room.caroLastMove !== prevLast) {
+          const placed = room.caroBoard[room.caroLastMove];
+          if (placed) playStoneSound(placed === 'X');
+        }
+        if (room.status === 'finished' && room.winnerUserId && room.winnerUserId !== prevWinner) {
+          if (soundEnabled) playWinSound();
+          onToast(`${room.winnerName} đã chiến thắng Cờ Caro!`, 'success');
+        }
+      } else if (type === 'game:error') {
+        onToast(String(payload.error || 'Không thể đánh nước này.'), 'warning');
+      }
+    });
+  }, [subscribe, sendEvent, soundEnabled, onToast]);
+
+  const handleJoinRoom = async (roomId: string) => {
+    try {
+      const res = await fetch(`/api/game-rooms/${encodeURIComponent(roomId)}/join`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, userName }),
+      });
+      const data = (await res.json()) as { room?: GameRoomDetail; error?: string };
+      if (!res.ok || !data.room) {
+        onToast(data.error || 'Không vào được bàn Cờ Caro.', 'warning');
+        return;
+      }
+      setActiveRoom(data.room);
+      sendEvent('game:join', { roomId: data.room.id });
+    } catch {
+      sendEvent('game:join', { roomId });
     }
-    setBoard(rebuilt);
-    setHistory(trimmed);
-    setTurn(trimmed.length % 2 === 0 ? 'X' : 'O');
   };
 
-  const lastMove = history[history.length - 1];
-  const winCellSet = new Set(winInfo?.line.map(([r, c]) => `${r}-${c}`) ?? []);
+  const handleCreateRoom = async () => {
+    setIsCreating(true);
+    try {
+      const res = await fetch('/api/game-rooms', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newRoomName.trim() || `Bàn Caro của ${userName}`,
+          gameType: 'caro',
+          maxPlayers: 2,
+          hostId: userId,
+          hostName: userName,
+        }),
+      });
+      const data = (await res.json()) as { room?: GameRoomSummary; error?: string };
+      if (!res.ok || !data.room) {
+        onToast(data.error || 'Không tạo được bàn Cờ Caro.', 'warning');
+        return;
+      }
+      setNewRoomName('');
+      await handleJoinRoom(data.room.id);
+      onToast(`Đã mở bàn "${data.room.name}"!`, 'success');
+    } catch {
+      onToast('Lỗi kết nối khi tạo bàn Cờ Caro.', 'warning');
+    } finally {
+      setIsCreating(false);
+    }
+  };
 
-  return (
-    <div className="rounded-2xl overflow-hidden border border-slate-800 bg-[#111520] shadow-2xl flex flex-col h-[600px]">
-      {/* Top Bar */}
-      <div className="px-4 py-2.5 bg-slate-900/90 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2 shrink-0">
-        <div className="flex items-center gap-2">
-          <h3 className="font-display text-sm sm:text-base font-bold text-slate-50">
-            Cờ Caro (5 Nước)
-          </h3>
-          <div className="flex items-center bg-slate-950 p-0.5 rounded-lg border border-slate-800">
-            <button
-              type="button"
-              onClick={() => resetGame('ai')}
-              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium transition-colors cursor-pointer ${
-                mode === 'ai'
-                  ? 'bg-amber-500 text-slate-950 font-semibold'
-                  : 'text-slate-400 hover:text-slate-100'
-              }`}
-            >
-              <Cpu className="w-3.5 h-3.5" />
-              <span>Đấu Máy</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => resetGame('pvp')}
-              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium transition-colors cursor-pointer ${
-                mode === 'pvp'
-                  ? 'bg-amber-500 text-slate-950 font-semibold'
-                  : 'text-slate-400 hover:text-slate-100'
-              }`}
-            >
-              <Users className="w-3.5 h-3.5" />
-              <span>2 Người</span>
-            </button>
+  const handleLeaveRoom = () => {
+    sendEvent('game:leave');
+    setActiveRoom(null);
+  };
+
+  const caroRooms = rooms.filter((r) => r.gameType === 'caro');
+
+  // --- LOBBY VIEW ---
+  if (!activeRoom) {
+    return (
+      <div className="rounded-2xl bg-[#111520] border border-slate-800/90 p-5 space-y-5 shadow-xl h-full flex flex-col">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 pb-4">
+          <div className="flex items-center gap-2.5">
+            <span className="w-9 h-9 rounded-xl bg-amber-500/15 border border-amber-500/35 flex items-center justify-center text-amber-400">
+              <Grid3X3 className="w-5 h-5" />
+            </span>
+            <div>
+              <h3 className="font-display text-lg font-bold text-slate-50">
+                Sảnh Cờ Caro 15×15 (Đấu 1v1 Người Thật)
+              </h3>
+              <p className="text-xs text-slate-400">
+                Chọn bàn thách đấu hoặc tạo phòng mới để so tài trực tiếp với người chơi khác
+              </p>
+            </div>
           </div>
-        </div>
 
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={handleUndo}
-            disabled={history.length === 0 || !!winInfo || isDraw}
-            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 text-xs font-medium transition-colors cursor-pointer"
-          >
-            <Undo2 className="w-3.5 h-3.5" />
-            <span>Đi lại</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => resetGame()}
-            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-semibold transition-colors cursor-pointer"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            <span>Ván mới</span>
-          </button>
-        </div>
-      </div>
-
-      {/* Score & Turn Status */}
-      <div className="px-4 py-2 bg-slate-950/60 border-b border-slate-800/80 flex items-center justify-between text-xs shrink-0">
-        <div className="flex items-center gap-4 font-mono tabular-nums">
-          <span className="text-rose-400 font-semibold">X: {scores.X}</span>
-          <span className="text-slate-400">Hòa: {scores.draw}</span>
-          <span className="text-sky-400 font-semibold">
-            {mode === 'ai' ? 'Máy (O)' : 'O'}: {scores.O}
+          <span className="text-xs font-mono text-amber-400">
+            {connected ? 'Sẵn sàng ghép đấu' : 'Đang kết nối...'}
           </span>
         </div>
-        <div className="font-medium">
-          {winInfo ? (
-            <span className="inline-flex items-center gap-1 text-amber-400 font-bold">
-              <Trophy className="w-3.5 h-3.5" />
-              {winInfo.winner} Chiến thắng!
-            </span>
-          ) : isDraw ? (
-            <span className="text-slate-300">Hòa cờ!</span>
-          ) : (
-            <span className={turn === 'X' ? 'text-rose-400' : 'text-sky-400'}>
-              Lượt: {turn === 'X' ? 'X (Bạn)' : mode === 'ai' ? 'Máy (O) đang nghĩ...' : 'O'}
-            </span>
+
+        {/* Create New Room */}
+        <div className="rounded-xl bg-slate-900/80 border border-slate-800 p-3.5 flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
+          <input
+            type="text"
+            value={newRoomName}
+            onChange={(e) => setNewRoomName(e.target.value)}
+            placeholder={`Tên bàn Cờ Caro (VD: Thách đấu cùng ${userName})...`}
+            className="flex-1 h-9 px-3 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-amber-500"
+          />
+          <button
+            type="button"
+            onClick={handleCreateRoom}
+            disabled={isCreating}
+            className="h-9 px-4 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs inline-flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>{isCreating ? 'Đang tạo...' : 'Tạo Bàn Caro Mới'}</span>
+          </button>
+        </div>
+
+        {/* Room Cards */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 flex-1">
+          {caroRooms.map((room) => (
+            <div
+              key={room.id}
+              className="rounded-xl bg-slate-900/70 border border-slate-800 p-4 flex flex-col justify-between gap-3 hover:border-amber-500/40 transition-colors"
+            >
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between gap-2 text-xs">
+                  <span className="font-mono text-amber-300 font-semibold">Mã: {room.code}</span>
+                  <span
+                    className={`font-semibold ${
+                      room.status === 'playing' ? 'text-rose-400' : 'text-emerald-400'
+                    }`}
+                  >
+                    {room.status === 'playing' ? 'Đang thi đấu' : 'Đang chờ đối thủ'}
+                  </span>
+                </div>
+                <p className="font-display text-sm font-bold text-slate-100 truncate">
+                  {room.name}
+                </p>
+                <p className="text-xs text-slate-400 truncate">
+                  {room.seats.length > 0
+                    ? `Người chơi: ${room.seats.map((s) => s.userName).join(' vs ')}`
+                    : 'Chưa có người ngồi — Vào làm quân X trước!'}
+                </p>
+              </div>
+
+              <div className="pt-2.5 border-t border-slate-800 flex items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1.5 text-xs font-mono text-slate-300 tabular-nums">
+                  <Users className="w-3.5 h-3.5 text-amber-400" />
+                  {room.playerCount}/2 người
+                </span>
+
+                <button
+                  type="button"
+                  onClick={() => handleJoinRoom(room.id)}
+                  className="px-3.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs cursor-pointer"
+                >
+                  {room.status === 'playing' || room.playerCount >= 2 ? 'Vào xem' : 'Vào bàn đấu'}
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  // --- ACTIVE CARO ROOM ---
+  const mySeatIdx = activeRoom.seats.findIndex((s) => s.userId === userId);
+  const mySymbol: 'X' | 'O' | null = mySeatIdx === 0 ? 'X' : mySeatIdx === 1 ? 'O' : null;
+  const isMyTurn = activeRoom.status === 'playing' && mySymbol === activeRoom.caroTurn;
+  const winSet = new Set(activeRoom.caroWinLine || []);
+
+  const seatX = activeRoom.seats[0];
+  const seatO = activeRoom.seats[1];
+
+  const handleCellClick = (idx: number) => {
+    if (!isMyTurn || activeRoom.caroBoard[idx] !== null) return;
+    sendEvent('game:caro_move', { index: idx });
+  };
+
+  const handleSendChat = () => {
+    const clean = chatInput.trim();
+    if (!clean) return;
+    sendEvent('game:chat', { text: clean });
+    setChatInput('');
+  };
+
+  return (
+    <div className="rounded-2xl bg-[#111520] border border-slate-800/90 overflow-hidden shadow-xl flex flex-col">
+      {/* Top Bar */}
+      <div className="px-4 py-3 border-b border-slate-800 bg-slate-900/60 flex flex-wrap items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-xs text-amber-400 font-semibold">
+            <Grid3X3 className="w-3.5 h-3.5" />
+            <span>{activeRoom.name}</span>
+            <span className="font-mono text-slate-300">#{activeRoom.code}</span>
+          </div>
+          <p className="text-[11px] text-slate-400 mt-0.5">
+            {seatX ? `X: ${seatX.userName}` : 'X: Trống'} · {seatO ? `O: ${seatO.userName}` : 'O: Trống'}
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setSoundEnabled((v) => !v)}
+            className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer"
+            title="Bật/Tắt âm thanh"
+          >
+            {soundEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
+          </button>
+
+          {!mySymbol && activeRoom.status !== 'playing' && activeRoom.seats.length < 2 && (
+            <button
+              type="button"
+              onClick={() => sendEvent('game:take_seat')}
+              className="px-3 py-1.5 rounded-lg bg-amber-500 text-slate-950 text-xs font-bold cursor-pointer"
+            >
+              Ngồi vào đấu
+            </button>
           )}
+
+          {mySymbol && activeRoom.status !== 'playing' && (
+            <button
+              type="button"
+              onClick={() => sendEvent('game:start')}
+              disabled={activeRoom.seats.length < 2}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-45 text-white text-xs font-bold cursor-pointer"
+            >
+              <Play className="w-3.5 h-3.5" />
+              <span>{activeRoom.status === 'finished' ? 'Đấu lại' : 'Bắt đầu ván'}</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={handleLeaveRoom}
+            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-rose-600/25 hover:text-rose-300 text-slate-200 text-xs font-semibold cursor-pointer"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span>Rời bàn</span>
+          </button>
         </div>
       </div>
 
-      {/* 15x15 Interactive Board */}
-      <div className="flex-1 flex items-center justify-center p-3 overflow-auto bg-[#0C0F17]">
-        <div
-          className="grid gap-px bg-slate-700/70 p-1 rounded-lg border border-slate-700 shadow-inner"
-          style={{ gridTemplateColumns: `repeat(${BOARD_SIZE}, minmax(0, 1fr))` }}
-        >
-          {board.map((row, r) =>
-            row.map((cell, c) => {
-              const isLast = lastMove?.row === r && lastMove?.col === c;
-              const isWinCell = winCellSet.has(`${r}-${c}`);
-              return (
-                <button
-                  key={`${r}-${c}`}
-                  type="button"
-                  onClick={() => handleCellClick(r, c)}
-                  aria-label={`Ô hàng ${r + 1} cột ${c + 1}`}
-                  className={`w-[21px] h-[21px] sm:w-[27px] sm:h-[27px] flex items-center justify-center text-xs sm:text-sm font-extrabold leading-none transition-colors cursor-pointer ${
-                    isWinCell
-                      ? 'bg-amber-500/30 ring-1 ring-amber-400'
-                      : isLast
-                        ? 'bg-slate-800 ring-1 ring-inset ring-amber-400/70'
-                        : 'bg-[#151A28] hover:bg-slate-800/80'
-                  }`}
-                >
-                  {cell === 'X' && <span className="text-rose-400">X</span>}
-                  {cell === 'O' && <span className="text-sky-400">O</span>}
-                </button>
-              );
-            })
-          )}
+      {/* Status & Board */}
+      <div className="p-4 flex flex-col items-center gap-3 bg-slate-950/40">
+        {activeRoom.status === 'waiting' ? (
+          <div className="w-full rounded-xl bg-slate-900/90 border border-slate-800 p-4 text-center space-y-1.5">
+            <Clock className="w-6 h-6 text-amber-400 mx-auto" />
+            <p className="text-sm font-semibold text-slate-100">
+              {activeRoom.seats.length < 2
+                ? `Đang chờ thêm 1 người chơi thật vào bàn (${activeRoom.seats.length}/2)`
+                : 'Cả 2 người chơi đã sẵn sàng — Bấm "Bắt đầu ván" để vào trận!'}
+            </p>
+            <p className="text-xs text-slate-400">
+              Mã bàn: <span className="font-mono text-amber-300 font-bold">{activeRoom.code}</span>
+            </p>
+          </div>
+        ) : (
+          <div className="w-full flex items-center justify-between text-xs px-2">
+            {activeRoom.status === 'finished' ? (
+              <span className="inline-flex items-center gap-1.5 text-amber-300 font-bold">
+                <Trophy className="w-4 h-4" />
+                {activeRoom.isDraw ? 'Hòa cờ!' : `${activeRoom.winnerName} chiến thắng!`}
+              </span>
+            ) : (
+              <span className="text-slate-200 font-semibold">
+                Lượt đi:{' '}
+                <span className={activeRoom.caroTurn === 'X' ? 'text-sky-400' : 'text-rose-400'}>
+                  Quân {activeRoom.caroTurn}
+                </span>{' '}
+                {isMyTurn ? '(Lượt của bạn!)' : ''}
+              </span>
+            )}
+            {mySymbol ? (
+              <span className="text-slate-400">
+                Bạn cầm quân{' '}
+                <strong className={mySymbol === 'X' ? 'text-sky-400' : 'text-rose-400'}>
+                  {mySymbol}
+                </strong>
+              </span>
+            ) : (
+              <span className="text-slate-400 inline-flex items-center gap-1">
+                <Eye className="w-3.5 h-3.5" /> Khán giả
+              </span>
+            )}
+          </div>
+        )}
+
+        <div className="w-full max-w-[460px] aspect-square grid grid-cols-[repeat(15,minmax(0,1fr))] bg-slate-800 border border-slate-700 rounded-xl overflow-hidden shadow-lg">
+          {activeRoom.caroBoard.map((cell, idx) => {
+            const isWin = winSet.has(idx);
+            const isLast = activeRoom.caroLastMove === idx;
+            return (
+              <button
+                key={idx}
+                type="button"
+                onClick={() => handleCellClick(idx)}
+                disabled={!isMyTurn || cell !== null}
+                className={`border border-slate-800/80 flex items-center justify-center text-xs sm:text-sm font-extrabold transition-colors ${
+                  isWin
+                    ? 'bg-emerald-500/35'
+                    : isLast
+                    ? 'bg-amber-500/20'
+                    : 'bg-[#101522] hover:bg-slate-800/80'
+                } ${isMyTurn && cell === null ? 'cursor-pointer' : 'cursor-default'}`}
+              >
+                {cell === 'X' && <span className="text-sky-400">X</span>}
+                {cell === 'O' && <span className="text-rose-400">O</span>}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Table Chat */}
+      <div className="border-t border-slate-800 bg-slate-950/60 p-3 space-y-2">
+        <div className="max-h-20 overflow-y-auto custom-scrollbar space-y-1 text-xs">
+          {activeRoom.chat.map((c) => (
+            <div key={c.id}>
+              <span className="font-mono text-[10px] text-slate-500 mr-1.5">[{c.timestamp}]</span>
+              <span className="font-semibold text-amber-300 mr-1">{c.sender}:</span>
+              <span className="text-slate-200">{c.text}</span>
+            </div>
+          ))}
+        </div>
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={chatInput}
+            onChange={(e) => setChatInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleSendChat()}
+            placeholder="Nhắn với đối thủ..."
+            className="flex-1 h-8 px-3 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-amber-500"
+          />
+          <button
+            type="button"
+            onClick={handleSendChat}
+            className="px-3 h-8 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold inline-flex items-center gap-1 cursor-pointer"
+          >
+            <Send className="w-3 h-3" />
+            <span>Gửi</span>
+          </button>
         </div>
       </div>
     </div>

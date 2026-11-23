@@ -13,6 +13,11 @@ import {
 } from 'lucide-react';
 import { Song } from '../types/karaoke';
 import { formatTime } from '../utils/vietnamese';
+import {
+  startBackgroundAudioKeepAlive,
+  stopBackgroundAudioKeepAlive,
+  syncMediaSession,
+} from '../utils/backgroundAudio';
 
 declare global {
   interface Window {
@@ -134,6 +139,14 @@ export function KaraokePlayer({
   const [playerError, setPlayerError] = useState<string | null>(null);
 
   const loadedVideoIdRef = useRef<string>(currentSong.youtubeId);
+  const wantPlayingRef = useRef(false);
+  const currentTimeRef = useRef(0);
+  const onNextRef = useRef(onNext);
+  onNextRef.current = onNext;
+
+  useEffect(() => {
+    currentTimeRef.current = currentTime;
+  }, [currentTime]);
 
   // Initialize YouTube IFrame Player once
   useEffect(() => {
@@ -170,12 +183,28 @@ export function KaraokePlayer({
             if (!active || !window.YT) return;
             const state = event.data;
             if (state === window.YT.PlayerState.PLAYING) {
+              wantPlayingRef.current = true;
+              startBackgroundAudioKeepAlive();
               setIsPlaying(true);
               setPlayerError(null);
               const d = event.target.getDuration();
               if (d > 0) setDuration(d);
             } else if (state === window.YT.PlayerState.PAUSED) {
-              setIsPlaying(false);
+              if (document.visibilityState === 'hidden' && wantPlayingRef.current) {
+                window.setTimeout(() => {
+                  if (active && wantPlayingRef.current) {
+                    try {
+                      event.target.playVideo();
+                    } catch {
+                      // Ignore
+                    }
+                  }
+                }, 120);
+              } else {
+                wantPlayingRef.current = false;
+                stopBackgroundAudioKeepAlive();
+                setIsPlaying(false);
+              }
             } else if (state === window.YT.PlayerState.ENDED) {
               setIsPlaying(false);
               onEndedRef.current();
@@ -191,8 +220,26 @@ export function KaraokePlayer({
       });
     });
 
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden' && wantPlayingRef.current && playerRef.current) {
+        startBackgroundAudioKeepAlive();
+        window.setTimeout(() => {
+          if (wantPlayingRef.current) {
+            try {
+              playerRef.current?.playVideo();
+            } catch {
+              // Ignore
+            }
+          }
+        }, 160);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
     return () => {
       active = false;
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      stopBackgroundAudioKeepAlive();
       try {
         playerRef.current?.destroy();
       } catch {
@@ -240,9 +287,13 @@ export function KaraokePlayer({
   const handleTogglePlay = useCallback(() => {
     if (!playerRef.current || !isReady) return;
     if (isPlaying) {
+      wantPlayingRef.current = false;
+      stopBackgroundAudioKeepAlive();
       playerRef.current.pauseVideo();
       setIsPlaying(false);
     } else {
+      wantPlayingRef.current = true;
+      startBackgroundAudioKeepAlive();
       playerRef.current.playVideo();
       setIsPlaying(true);
     }
@@ -250,6 +301,8 @@ export function KaraokePlayer({
 
   const handleReplay = useCallback(() => {
     if (!playerRef.current || !isReady) return;
+    wantPlayingRef.current = true;
+    startBackgroundAudioKeepAlive();
     playerRef.current.seekTo(0, true);
     playerRef.current.playVideo();
     setCurrentTime(0);
@@ -283,12 +336,51 @@ export function KaraokePlayer({
     }
   };
 
-  const handleSeek = (seconds: number) => {
-    setCurrentTime(seconds);
-    if (playerRef.current && isReady) {
-      playerRef.current.seekTo(seconds, true);
-    }
-  };
+  const handleSeek = useCallback(
+    (seconds: number) => {
+      setCurrentTime(seconds);
+      if (playerRef.current && isReady) {
+        playerRef.current.seekTo(seconds, true);
+      }
+    },
+    [isReady]
+  );
+
+  // Sync mobile lock-screen media controls for Karaoke playback
+  useEffect(() => {
+    syncMediaSession({
+      title: currentSong.title,
+      artist: currentSong.artist,
+      album: `${currentSong.genre} · Karaoke Điệp Khúc Online`,
+      youtubeId: currentSong.youtubeId,
+      isPlaying,
+      durationSeconds: duration,
+      positionSeconds: currentTimeRef.current,
+      onPlay: () => {
+        wantPlayingRef.current = true;
+        startBackgroundAudioKeepAlive();
+        playerRef.current?.playVideo();
+        setIsPlaying(true);
+      },
+      onPause: () => {
+        wantPlayingRef.current = false;
+        stopBackgroundAudioKeepAlive();
+        playerRef.current?.pauseVideo();
+        setIsPlaying(false);
+      },
+      onNext: hasNext ? () => onNextRef.current() : undefined,
+      onSeekTo: handleSeek,
+    });
+  }, [
+    currentSong.title,
+    currentSong.artist,
+    currentSong.genre,
+    currentSong.youtubeId,
+    isPlaying,
+    duration,
+    hasNext,
+    handleSeek,
+  ]);
 
   // Calculate active synced lyric index smoothly across playback duration
   const totalLines = currentSong.lyrics.length;

@@ -145,3 +145,47 @@ export interface WeeklyGifterEntry {
   topGiftLabel: string;
   lastGiftAt: number;
 }
+
+export type GameType = 'tien-len' | 'caro';
+
+export interface GameSeat {
+  userId: string;
+  userName: string;
+  seatIndex: number;
+  cardCount?: number;
+  passed?: boolean;
+}
+
+export interface GameRoomSummary {
+  id: string;
+  code: string;
+  name: string;
+  gameType: GameType;
+  maxPlayers: number;
+  hostId: string;
+  hostName: string;
+  status: 'waiting' | 'playing' | 'finished';
+  playerCount: number;
+  spectatorCount: number;
+  seats: GameSeat[];
+}
+
+export interface GameRoomDetail extends GameRoomSummary {
+  spectators: Array<{ userId: string; userName: string }>;
+  turnUserId: string | null;
+  mustInclude3Spade: boolean;
+  lastPlay: {
+    userId: string;
+    userName: string;
+    cards: Array<{ id: string; rank: number; suit: 'spades' | 'clubs' | 'diamonds' | 'hearts' }>;
+    type: string;
+  } | null;
+  caroBoard: Array<'X' | 'O' | null>;
+  caroTurn: 'X' | 'O';
+  caroLastMove: number | null;
+  caroWinLine: number[] | null;
+  winnerUserId: string | null;
+  winnerName: string | null;
+  isDraw: boolean;
+  chat: Array<{ id: string; sender: string; text: string; timestamp: string }>;
+}

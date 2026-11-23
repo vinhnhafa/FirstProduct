@@ -1,7 +1,20 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Spade, Grid3X3 } from 'lucide-react';
 import { KARAOKE_SONGS } from './data/songs';
-import { AppView, LiveRoomSummary, QueueItem, Song, ToastMessage, WeeklyGifterEntry } from './types/karaoke';
+import {
+  AppView,
+  GameRoomSummary,
+  LiveRoomSummary,
+  QueueItem,
+  Song,
+  ToastMessage,
+  WeeklyGifterEntry,
+} from './types/karaoke';
+import {
+  buildSongUrlPath,
+  parseMediaUrlPath,
+  updateDocumentSeo,
+} from './utils/vietnamese';
 import { useRealtimeSocket } from './hooks/useRealtimeSocket';
 import { Header } from './components/Header';
 import { KaraokePlayer } from './components/KaraokePlayer';
@@ -97,10 +110,36 @@ function loadInitialQueue(): QueueItem[] {
 }
 
 export default function App() {
+  const initialRoute = useMemo(() => {
+    if (typeof window === 'undefined') return null;
+    return parseMediaUrlPath(window.location.pathname);
+  }, []);
+
   const [userId] = useState<string>(getOrCreateUserId);
   const [nickname, setNickname] = useState<string>(getInitialNickname);
-  const [activeView, setActiveView] = useState<AppView>('stage');
-  const [currentSong, setCurrentSong] = useState<Song>(loadInitialCurrentSong);
+  const [activeView, setActiveView] = useState<AppView>(() =>
+    initialRoute?.kind === 'mp3' ? 'music' : 'stage'
+  );
+  const [initialMp3YoutubeId] = useState<string | null>(() =>
+    initialRoute?.kind === 'mp3' ? initialRoute.youtubeId : null
+  );
+  const [currentSong, setCurrentSong] = useState<Song>(() => {
+    if (initialRoute?.kind === 'karaoke') {
+      const found = KARAOKE_SONGS.find((s) => s.youtubeId === initialRoute.youtubeId);
+      if (found) return found;
+      return {
+        id: `yt-${initialRoute.youtubeId}`,
+        youtubeId: initialRoute.youtubeId,
+        title: initialRoute.rawSlug.replace(/-/g, ' '),
+        artist: 'Nguồn YouTube',
+        genre: 'Nhạc Trẻ',
+        durationSeconds: 240,
+        isKaraoke: true,
+        lyrics: ['Đang phát bài hát Karaoke trực tuyến.'],
+      };
+    }
+    return loadInitialCurrentSong();
+  });
   const [queue, setQueue] = useState<QueueItem[]>(loadInitialQueue);
   const [blockedIds, setBlockedIds] = useState<string[]>(loadInitialBlockedIds);
   const [isTvMode, setIsTvMode] = useState(false);
@@ -108,9 +147,10 @@ export default function App() {
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [sharedToChat, setSharedToChat] = useState<{ song: Song; seq: number } | null>(null);
 
-  // Realtime Server State (Heart Wallet + Live Singing Rooms + Weekly Leaderboard)
+  // Realtime Server State (Heart Wallet + Live Singing Rooms + Multiplayer Game Rooms + Leaderboard)
   const [heartsBalance, setHeartsBalance] = useState<number>(30);
   const [liveRooms, setLiveRooms] = useState<LiveRoomSummary[]>([]);
+  const [gameRooms, setGameRooms] = useState<GameRoomSummary[]>([]);
   const [heartLeaderboard, setHeartLeaderboard] = useState<WeeklyGifterEntry[]>([]);
   const [isHeartStoreOpen, setIsHeartStoreOpen] = useState(false);
   const [roomCreateSong, setRoomCreateSong] = useState<Song | null>(null);
@@ -157,6 +197,13 @@ export default function App() {
       })
       .catch(() => {});
 
+    fetch('/api/game-rooms')
+      .then((r) => r.json())
+      .then((d: { rooms?: GameRoomSummary[] }) => {
+        if (Array.isArray(d.rooms)) setGameRooms(d.rooms);
+      })
+      .catch(() => {});
+
     fetch('/api/leaderboard/hearts')
       .then((r) => r.json())
       .then((d: { entries?: WeeklyGifterEntry[] }) => {
@@ -172,7 +219,28 @@ export default function App() {
         }
       })
       .catch(() => {});
-  }, [userId]);
+
+    if (
+      initialRoute?.kind === 'karaoke' &&
+      !KARAOKE_SONGS.some((s) => s.youtubeId === initialRoute.youtubeId)
+    ) {
+      fetch(`/api/youtube/oembed?id=${encodeURIComponent(initialRoute.youtubeId)}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d: { title?: string; artist?: string } | null) => {
+          if (!d?.title) return;
+          setCurrentSong((prev) =>
+            prev.youtubeId === initialRoute.youtubeId
+              ? {
+                  ...prev,
+                  title: d.title || prev.title,
+                  artist: d.artist || prev.artist,
+                }
+              : prev
+          );
+        })
+        .catch(() => {});
+    }
+  }, [userId, initialRoute]);
 
   useEffect(() => {
     return subscribe((type, payload) => {
@@ -180,11 +248,32 @@ export default function App() {
         setHeartsBalance(payload.heartsBalance);
       } else if (type === 'rooms:list' && Array.isArray(payload.rooms)) {
         setLiveRooms(payload.rooms as LiveRoomSummary[]);
+      } else if (type === 'game:list' && Array.isArray(payload.rooms)) {
+        setGameRooms(payload.rooms as GameRoomSummary[]);
       } else if (type === 'leaderboard:hearts_updated' && Array.isArray(payload.entries)) {
         setHeartLeaderboard(payload.entries as WeeklyGifterEntry[]);
       }
     });
   }, [subscribe]);
+
+  // Dynamic URL (song name before ID) and SEO descriptions containing "karaoke" for Karaoke views
+  useEffect(() => {
+    if (activeView === 'music' && !isTvMode) return;
+    const cleanTitle = currentSong.title;
+    const displayTitle = cleanTitle.toLowerCase().includes('karaoke')
+      ? `${cleanTitle} | Điệp Khúc Online`
+      : `${cleanTitle} Karaoke | Điệp Khúc Online`;
+    const description = `Hát karaoke trực tuyến bài hát ${cleanTitle} - ${currentSong.artist} (${currentSong.genre}). Nhạc karaoke beat chuẩn chữ chạy dễ hát, hỗ trợ phòng hát Live và nghe nền khi tắt màn hình.`;
+    const path = buildSongUrlPath(cleanTitle, currentSong.youtubeId, 'karaoke');
+    updateDocumentSeo({ title: displayTitle, description, path });
+  }, [
+    activeView,
+    isTvMode,
+    currentSong.title,
+    currentSong.artist,
+    currentSong.genre,
+    currentSong.youtubeId,
+  ]);
 
   // Persist queue, current song & nickname
   useEffect(() => {
@@ -504,6 +593,7 @@ export default function App() {
         {!isTvMode && activeView === 'music' && (
           <MusicListenPage
             blockedYoutubeIds={blockedSet}
+            initialYoutubeId={initialMp3YoutubeId}
             onReportBrokenVideo={handleReportBrokenVideo}
             onSearchKaraokeVersion={handleSearchKaraokeFromMusic}
             onToast={addToast}
@@ -593,9 +683,25 @@ export default function App() {
 
               <div className="lg:col-span-7">
                 {activeGame === 'tien-len' ? (
-                  <TienLenGame onToast={addToast} />
+                  <TienLenGame
+                    userId={userId}
+                    userName={nickname}
+                    rooms={gameRooms}
+                    connected={connected}
+                    sendEvent={sendEvent}
+                    subscribe={subscribe}
+                    onToast={addToast}
+                  />
                 ) : (
-                  <CaroGame onToast={addToast} />
+                  <CaroGame
+                    userId={userId}
+                    userName={nickname}
+                    rooms={gameRooms}
+                    connected={connected}
+                    sendEvent={sendEvent}
+                    subscribe={subscribe}
+                    onToast={addToast}
+                  />
                 )}
               </div>
             </div>

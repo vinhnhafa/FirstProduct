@@ -3,6 +3,15 @@ import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
+import {
+  Card,
+  CardCombo,
+  canBeat,
+  checkCaroWin,
+  createShuffledDeck,
+  evaluateCombo,
+  sortCards,
+} from './shared/gameEngine';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -88,6 +97,7 @@ interface ClientSession {
   userName: string;
   karaokeRoomId: string | null;
   ymRoomId: string | null;
+  gameRoomId: string | null;
 }
 
 const DEFAULT_ROOM_SONG: RoomSong = {
@@ -615,7 +625,7 @@ const ymHistory = new Map<string, YmMessage[]>([
       {
         id: 'ym-init-1',
         roomId: 'nhac-tre',
-        sender: 'Điệp Khúc Bot',
+        sender: 'Quản Trị Phòng',
         text: 'Chào mừng đến phòng Yahoo Nhạc Trẻ! Bạn có thể gửi BUZZ! hoặc chia sẻ bài hát đang nghe.',
         timestamp: '20:00',
         color: '#FBBF24',
@@ -628,7 +638,7 @@ const ymHistory = new Map<string, YmMessage[]>([
       {
         id: 'ym-init-2',
         roomId: 'bolero',
-        sender: 'Điệp Khúc Bot',
+        sender: 'Quản Trị Phòng',
         text: 'Phòng Bolero Sầu Tím — nơi giao lưu những giọng ca trữ tình.',
         timestamp: '20:00',
         color: '#C084FC',
@@ -641,7 +651,7 @@ const ymHistory = new Map<string, YmMessage[]>([
       {
         id: 'ym-init-3',
         roomId: 'remix',
-        sender: 'Điệp Khúc Bot',
+        sender: 'Quản Trị Phòng',
         text: 'Phòng Quẩy Remix sẵn sàng lên nhạc cùng anh em!',
         timestamp: '20:00',
         color: '#34D399',
@@ -654,7 +664,7 @@ const ymHistory = new Map<string, YmMessage[]>([
       {
         id: 'ym-init-4',
         roomId: 'game-thu',
-        sender: 'Điệp Khúc Bot',
+        sender: 'Quản Trị Phòng',
         text: 'Phòng Cao Thủ Game — bàn luận Tiến Lên Miền Nam & Cờ Caro.',
         timestamp: '20:00',
         color: '#38BDF8',
@@ -751,6 +761,270 @@ function seedStarterRooms() {
 }
 
 seedStarterRooms();
+
+// --- MULTIPLAYER GAME ROOMS (REAL PLAYERS ONLY, SERVER-AUTHORITATIVE) ---
+interface ServerGameSeat {
+  userId: string;
+  userName: string;
+  seatIndex: number;
+}
+
+interface ServerGameRoom {
+  id: string;
+  code: string;
+  name: string;
+  gameType: 'tien-len' | 'caro';
+  maxPlayers: number;
+  hostId: string;
+  hostName: string;
+  status: 'waiting' | 'playing' | 'finished';
+  seats: ServerGameSeat[];
+  spectators: Array<{ userId: string; userName: string }>;
+  hands: Map<string, Card[]>;
+  passedUserIds: Set<string>;
+  turnUserId: string | null;
+  lastPlay: { userId: string; userName: string; combo: CardCombo } | null;
+  mustInclude3Spade: boolean;
+  caroBoard: Array<'X' | 'O' | null>;
+  caroTurn: 'X' | 'O';
+  caroLastMove: number | null;
+  caroWinLine: number[] | null;
+  winnerUserId: string | null;
+  winnerName: string | null;
+  isDraw: boolean;
+  chat: Array<{ id: string; sender: string; text: string; timestamp: string }>;
+  createdAt: number;
+}
+
+const gameRooms = new Map<string, ServerGameRoom>();
+
+function seedStarterGameRooms() {
+  const presets: Array<{ id: string; code: string; name: string; gameType: 'tien-len' | 'caro'; maxPlayers: number }> = [
+    { id: 'g-tienlen-1', code: 'TL0001', name: 'Bàn Tiến Lên #1 — Giao Lưu 4 Người', gameType: 'tien-len', maxPlayers: 4 },
+    { id: 'g-tienlen-2', code: 'TL0002', name: 'Bàn Tiến Lên #2 — Đấu Nhanh', gameType: 'tien-len', maxPlayers: 4 },
+    { id: 'g-caro-1', code: 'CR0001', name: 'Bàn Cờ Caro #1 — Thách Đấu 1v1', gameType: 'caro', maxPlayers: 2 },
+    { id: 'g-caro-2', code: 'CR0002', name: 'Bàn Cờ Caro #2 — Giao Lưu', gameType: 'caro', maxPlayers: 2 },
+  ];
+
+  for (const p of presets) {
+    gameRooms.set(p.id, {
+      id: p.id,
+      code: p.code,
+      name: p.name,
+      gameType: p.gameType,
+      maxPlayers: p.maxPlayers,
+      hostId: 'system-table',
+      hostName: 'Bàn mở',
+      status: 'waiting',
+      seats: [],
+      spectators: [],
+      hands: new Map(),
+      passedUserIds: new Set(),
+      turnUserId: null,
+      lastPlay: null,
+      mustInclude3Spade: false,
+      caroBoard: Array(225).fill(null),
+      caroTurn: 'X',
+      caroLastMove: null,
+      caroWinLine: null,
+      winnerUserId: null,
+      winnerName: null,
+      isDraw: false,
+      chat: [],
+      createdAt: Date.now(),
+    });
+  }
+}
+
+seedStarterGameRooms();
+
+function serializeGameRoomSummary(room: ServerGameRoom) {
+  return {
+    id: room.id,
+    code: room.code,
+    name: room.name,
+    gameType: room.gameType,
+    maxPlayers: room.maxPlayers,
+    hostId: room.hostId,
+    hostName: room.hostName,
+    status: room.status,
+    playerCount: room.seats.length,
+    spectatorCount: room.spectators.length,
+    seats: room.seats.map((s) => ({
+      userId: s.userId,
+      userName: s.userName,
+      seatIndex: s.seatIndex,
+      cardCount: room.hands.get(s.userId)?.length ?? 0,
+      passed: room.passedUserIds.has(s.userId),
+    })),
+  };
+}
+
+function serializeGameRoomDetail(room: ServerGameRoom) {
+  return {
+    ...serializeGameRoomSummary(room),
+    spectators: room.spectators,
+    turnUserId: room.turnUserId,
+    mustInclude3Spade: room.mustInclude3Spade,
+    lastPlay: room.lastPlay
+      ? {
+          userId: room.lastPlay.userId,
+          userName: room.lastPlay.userName,
+          cards: room.lastPlay.combo.cards,
+          type: room.lastPlay.combo.type,
+        }
+      : null,
+    caroBoard: room.caroBoard,
+    caroTurn: room.caroTurn,
+    caroLastMove: room.caroLastMove,
+    caroWinLine: room.caroWinLine,
+    winnerUserId: room.winnerUserId,
+    winnerName: room.winnerName,
+    isDraw: room.isDraw,
+    chat: room.chat.slice(-40),
+  };
+}
+
+function broadcastGameRoomList() {
+  const list = Array.from(gameRooms.values()).map(serializeGameRoomSummary);
+  for (const client of clients.values()) {
+    sendJson(client.ws, 'game:list', { rooms: list });
+  }
+}
+
+function broadcastGameRoom(room: ServerGameRoom) {
+  const detail = serializeGameRoomDetail(room);
+  for (const client of clients.values()) {
+    if (client.gameRoomId === room.id) {
+      sendJson(client.ws, 'game:room_state', { room: detail });
+      if (room.gameType === 'tien-len') {
+        const hand = room.hands.get(client.userId) || [];
+        sendJson(client.ws, 'game:private_hand', { roomId: room.id, hand });
+      }
+    }
+  }
+}
+
+function joinServerGameRoom(room: ServerGameRoom, userId: string, userName: string) {
+  const existingSeat = room.seats.find((s) => s.userId === userId);
+  if (existingSeat) {
+    existingSeat.userName = userName;
+    if (room.hostId === userId) room.hostName = userName;
+    return;
+  }
+
+  room.spectators = room.spectators.filter((sp) => sp.userId !== userId);
+
+  if (room.seats.length < room.maxPlayers && room.status !== 'playing') {
+    const usedIndices = new Set(room.seats.map((s) => s.seatIndex));
+    let seatIndex = 0;
+    while (usedIndices.has(seatIndex)) seatIndex++;
+    room.seats.push({ userId, userName, seatIndex });
+    room.seats.sort((a, b) => a.seatIndex - b.seatIndex);
+    if (room.hostId === 'system-table' || room.seats.length === 1) {
+      room.hostId = userId;
+      room.hostName = userName;
+    }
+  } else {
+    room.spectators.push({ userId, userName });
+  }
+}
+
+function leaveServerGameRoom(session: ClientSession) {
+  if (!session.gameRoomId) return;
+  const room = gameRooms.get(session.gameRoomId);
+  session.gameRoomId = null;
+  if (!room) return;
+
+  const wasSeated = room.seats.some((s) => s.userId === session.userId);
+  room.seats = room.seats.filter((s) => s.userId !== session.userId);
+  room.spectators = room.spectators.filter((s) => s.userId !== session.userId);
+  room.hands.delete(session.userId);
+  room.passedUserIds.delete(session.userId);
+
+  if (room.hostId === session.userId) {
+    if (room.seats.length > 0) {
+      room.hostId = room.seats[0].userId;
+      room.hostName = room.seats[0].userName;
+    } else {
+      room.hostId = 'system-table';
+      room.hostName = 'Bàn mở';
+    }
+  }
+
+  if (wasSeated && room.status === 'playing' && room.seats.length < 2) {
+    room.status = 'waiting';
+    room.turnUserId = null;
+    room.lastPlay = null;
+    room.hands.clear();
+    room.passedUserIds.clear();
+    room.caroBoard = Array(225).fill(null);
+    room.caroLastMove = null;
+    room.caroWinLine = null;
+    room.chat.push({
+      id: `gc-${Date.now()}`,
+      sender: 'Hệ thống',
+      text: `${session.userName} đã rời bàn. Ván đấu tạm dừng để chờ đủ người chơi.`,
+      timestamp: nowTimeStr(),
+    });
+  } else if (wasSeated && room.status === 'playing' && room.turnUserId === session.userId) {
+    const nextSeat = room.seats.find((s) => !room.passedUserIds.has(s.userId)) || room.seats[0];
+    room.turnUserId = nextSeat?.userId || null;
+  }
+
+  broadcastGameRoom(room);
+  broadcastGameRoomList();
+}
+
+function startGameInRoom(room: ServerGameRoom) {
+  room.winnerUserId = null;
+  room.winnerName = null;
+  room.isDraw = false;
+  room.status = 'playing';
+
+  if (room.gameType === 'caro') {
+    room.caroBoard = Array(225).fill(null);
+    room.caroTurn = 'X';
+    room.caroLastMove = null;
+    room.caroWinLine = null;
+    room.turnUserId = room.seats[0]?.userId || null;
+    room.chat.push({
+      id: `gc-${Date.now()}`,
+      sender: 'Hệ thống',
+      text: `Ván Cờ Caro bắt đầu! ${room.seats[0]?.userName || 'X'} đi quân X trước.`,
+      timestamp: nowTimeStr(),
+    });
+    return;
+  }
+
+  // Tiến Lên Miền Nam: Deal 13 cards per seated real player
+  const deck = createShuffledDeck();
+  room.hands.clear();
+  room.passedUserIds.clear();
+  room.lastPlay = null;
+
+  let starterUserId = room.seats[0].userId;
+  let has3SpadeGlobal = false;
+
+  room.seats.forEach((seat, idx) => {
+    const hand = sortCards(deck.slice(idx * 13, (idx + 1) * 13));
+    room.hands.set(seat.userId, hand);
+    if (hand.some((c) => c.rank === 3 && c.suit === 'spades')) {
+      starterUserId = seat.userId;
+      has3SpadeGlobal = true;
+    }
+  });
+
+  room.mustInclude3Spade = has3SpadeGlobal;
+  room.turnUserId = starterUserId;
+  const starterName = room.seats.find((s) => s.userId === starterUserId)?.userName || 'Người chơi';
+  room.chat.push({
+    id: `gc-${Date.now()}`,
+    sender: 'Hệ thống',
+    text: `Đã chia bài cho ${room.seats.length} người chơi! ${starterName} đánh trước.`,
+    timestamp: nowTimeStr(),
+  });
+}
 
 function getOrInitWallet(userId: string): number {
   if (!wallets.has(userId)) {
@@ -1003,6 +1277,100 @@ async function bootstrap() {
     res.json({ entries: getWeeklyLeaderboardEntries() });
   });
 
+  // Multiplayer Game Rooms REST API
+  app.get('/api/game-rooms', (_req, res) => {
+    res.json({ rooms: Array.from(gameRooms.values()).map(serializeGameRoomSummary) });
+  });
+
+  app.get('/api/game-rooms/:roomId', (req, res) => {
+    const room = gameRooms.get(req.params.roomId);
+    if (!room) {
+      res.status(404).json({ error: 'Không tìm thấy bàn chơi.' });
+      return;
+    }
+    const uid = String(req.query.userId || '');
+    res.json({
+      room: serializeGameRoomDetail(room),
+      hand: uid ? room.hands.get(uid) || [] : [],
+    });
+  });
+
+  app.post('/api/game-rooms', (req, res) => {
+    const { name, gameType, maxPlayers, hostId, hostName } = req.body as {
+      name?: string;
+      gameType?: 'tien-len' | 'caro';
+      maxPlayers?: number;
+      hostId?: string;
+      hostName?: string;
+    };
+
+    const gType = gameType === 'caro' ? 'caro' : 'tien-len';
+    const cleanName = (name || '').trim() || (gType === 'caro' ? 'Bàn Cờ Caro Mới' : 'Bàn Tiến Lên Mới');
+    const seatsLimit = gType === 'caro' ? 2 : Math.min(4, Math.max(2, Number(maxPlayers || 4)));
+    const id = `g-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const code = Math.random().toString(36).substring(2, 8).toUpperCase();
+
+    const room: ServerGameRoom = {
+      id,
+      code,
+      name: cleanName,
+      gameType: gType,
+      maxPlayers: seatsLimit,
+      hostId: hostId || 'system-table',
+      hostName: (hostName || 'Chủ bàn').trim(),
+      status: 'waiting',
+      seats: [],
+      spectators: [],
+      hands: new Map(),
+      passedUserIds: new Set(),
+      turnUserId: null,
+      lastPlay: null,
+      mustInclude3Spade: false,
+      caroBoard: Array(225).fill(null),
+      caroTurn: 'X',
+      caroLastMove: null,
+      caroWinLine: null,
+      winnerUserId: null,
+      winnerName: null,
+      isDraw: false,
+      chat: [],
+      createdAt: Date.now(),
+    };
+
+    gameRooms.set(id, room);
+    broadcastGameRoomList();
+    res.status(201).json({ room: serializeGameRoomSummary(room) });
+  });
+
+  app.post('/api/game-rooms/:roomId/join', (req, res) => {
+    const room = gameRooms.get(req.params.roomId);
+    if (!room) {
+      res.status(404).json({ error: 'Không tìm thấy bàn chơi.' });
+      return;
+    }
+    const { userId, userName } = req.body as { userId?: string; userName?: string };
+    const uid = (userId || `player-${Date.now()}`).trim();
+    const uname = (userName || 'Người chơi').trim().slice(0, 28);
+
+    const session = clients.get(uid);
+    if (session) {
+      if (session.gameRoomId && session.gameRoomId !== room.id) {
+        leaveServerGameRoom(session);
+      }
+      session.gameRoomId = room.id;
+      session.userName = uname;
+    }
+
+    joinServerGameRoom(room, uid, uname);
+    broadcastGameRoom(room);
+    broadcastGameRoomList();
+
+    res.json({
+      room: serializeGameRoomDetail(room),
+      hand: room.hands.get(uid) || [],
+    });
+  });
+
   // Rooms REST API (Reliable entry + state sync alongside WebSocket)
   app.get('/api/rooms', (_req, res) => {
     res.json({ rooms: Array.from(rooms.values()).map(serializeRoomSummary) });
@@ -1128,6 +1496,7 @@ async function bootstrap() {
       userName: 'Ca sĩ ẩn danh',
       karaokeRoomId: null,
       ymRoomId: null,
+      gameRoomId: null,
     });
 
     ws.on('message', (raw) => {
@@ -1149,6 +1518,7 @@ async function bootstrap() {
             userName: uname,
             karaokeRoomId: prevSession?.karaokeRoomId ?? clients.get(uid)?.karaokeRoomId ?? null,
             ymRoomId: prevSession?.ymRoomId ?? clients.get(uid)?.ymRoomId ?? null,
+            gameRoomId: prevSession?.gameRoomId ?? clients.get(uid)?.gameRoomId ?? null,
           });
           const balance = getOrInitWallet(uid);
           sendJson(ws, 'wallet:updated', { heartsBalance: balance });
@@ -1157,6 +1527,9 @@ async function bootstrap() {
           });
           sendJson(ws, 'leaderboard:hearts_updated', {
             entries: getWeeklyLeaderboardEntries(),
+          });
+          sendJson(ws, 'game:list', {
+            rooms: Array.from(gameRooms.values()).map(serializeGameRoomSummary),
           });
           return;
         }
@@ -1572,6 +1945,233 @@ async function bootstrap() {
           broadcastYmRoom(roomId, 'ym:buzz', { message: buzzMsg });
           return;
         }
+
+        // --- MULTIPLAYER GAME ROOMS ---
+        if (msg.type === 'game:join') {
+          const roomId = String(payload.roomId || '');
+          const room = gameRooms.get(roomId);
+          if (!room) return;
+          if (session.gameRoomId && session.gameRoomId !== room.id) {
+            leaveServerGameRoom(session);
+          }
+          session.gameRoomId = room.id;
+          joinServerGameRoom(room, session.userId, session.userName);
+          broadcastGameRoom(room);
+          broadcastGameRoomList();
+          return;
+        }
+
+        if (msg.type === 'game:leave') {
+          leaveServerGameRoom(session);
+          return;
+        }
+
+        if (msg.type === 'game:take_seat') {
+          const room = session.gameRoomId ? gameRooms.get(session.gameRoomId) : null;
+          if (!room || room.status === 'playing') return;
+          if (room.seats.some((s) => s.userId === session.userId)) return;
+          if (room.seats.length >= room.maxPlayers) {
+            sendJson(ws, 'game:error', { error: 'Bàn chơi đã đủ người.' });
+            return;
+          }
+          joinServerGameRoom(room, session.userId, session.userName);
+          broadcastGameRoom(room);
+          broadcastGameRoomList();
+          return;
+        }
+
+        if (msg.type === 'game:start') {
+          const room = session.gameRoomId ? gameRooms.get(session.gameRoomId) : null;
+          if (!room) return;
+          if (!room.seats.some((s) => s.userId === session.userId)) {
+            sendJson(ws, 'game:error', { error: 'Chỉ người ngồi trong bàn mới có thể bắt đầu.' });
+            return;
+          }
+          if (room.seats.length < 2) {
+            sendJson(ws, 'game:error', { error: 'Cần ít nhất 2 người chơi thật trong bàn để bắt đầu!' });
+            return;
+          }
+          startGameInRoom(room);
+          broadcastGameRoom(room);
+          broadcastGameRoomList();
+          return;
+        }
+
+        if (msg.type === 'game:play_cards') {
+          const room = session.gameRoomId ? gameRooms.get(session.gameRoomId) : null;
+          if (!room || room.gameType !== 'tien-len' || room.status !== 'playing') return;
+          if (room.turnUserId !== session.userId) {
+            sendJson(ws, 'game:error', { error: 'Chưa tới lượt đánh của bạn.' });
+            return;
+          }
+
+          const cardIds = Array.isArray(payload.cardIds) ? payload.cardIds.map(String) : [];
+          const hand = room.hands.get(session.userId) || [];
+          const selected = hand.filter((c) => cardIds.includes(c.id));
+          if (selected.length !== cardIds.length || selected.length === 0) {
+            sendJson(ws, 'game:error', { error: 'Lá bài không hợp lệ.' });
+            return;
+          }
+
+          const combo = evaluateCombo(selected);
+          if (!combo) {
+            sendJson(ws, 'game:error', { error: 'Bộ bài không hợp lệ theo luật Tiến Lên Miền Nam!' });
+            return;
+          }
+
+          if (room.mustInclude3Spade && !selected.some((c) => c.rank === 3 && c.suit === 'spades')) {
+            sendJson(ws, 'game:error', { error: 'Ván đầu tiên phải đánh kèm lá 3♠!' });
+            return;
+          }
+
+          if (!canBeat(combo, room.lastPlay?.combo || null)) {
+            sendJson(ws, 'game:error', { error: 'Bài của bạn chưa đủ lớn để chặt bài trên bàn!' });
+            return;
+          }
+
+          const remaining = hand.filter((c) => !cardIds.includes(c.id));
+          room.hands.set(session.userId, remaining);
+          room.lastPlay = { userId: session.userId, userName: session.userName, combo };
+          room.mustInclude3Spade = false;
+
+          if (remaining.length === 0) {
+            room.status = 'finished';
+            room.winnerUserId = session.userId;
+            room.winnerName = session.userName;
+            room.turnUserId = null;
+            room.chat.push({
+              id: `gc-${Date.now()}`,
+              sender: 'Hệ thống',
+              text: `${session.userName} đã về nhất ván Tiến Lên!`,
+              timestamp: nowTimeStr(),
+            });
+            broadcastGameRoom(room);
+            broadcastGameRoomList();
+            return;
+          }
+
+          // Advance turn to next active (non-passed) seated player
+          const curIdx = room.seats.findIndex((s) => s.userId === session.userId);
+          let nextUserId: string | null = null;
+          for (let offset = 1; offset <= room.seats.length; offset++) {
+            const cand = room.seats[(curIdx + offset) % room.seats.length];
+            if (!room.passedUserIds.has(cand.userId)) {
+              nextUserId = cand.userId;
+              break;
+            }
+          }
+          room.turnUserId = nextUserId;
+          broadcastGameRoom(room);
+          return;
+        }
+
+        if (msg.type === 'game:pass_turn') {
+          const room = session.gameRoomId ? gameRooms.get(session.gameRoomId) : null;
+          if (!room || room.gameType !== 'tien-len' || room.status !== 'playing') return;
+          if (room.turnUserId !== session.userId) return;
+          if (!room.lastPlay) {
+            sendJson(ws, 'game:error', { error: 'Bạn đang cầm cái vòng mới, không thể bỏ lượt!' });
+            return;
+          }
+
+          room.passedUserIds.add(session.userId);
+          const remainingActive = room.seats.filter((s) => !room.passedUserIds.has(s.userId));
+
+          if (remainingActive.length <= 1) {
+            // New round starts with the lastPlay owner (or remaining active seat)
+            const leadId =
+              remainingActive[0]?.userId ||
+              room.lastPlay.userId ||
+              room.seats[0]?.userId ||
+              null;
+            room.passedUserIds.clear();
+            room.lastPlay = null;
+            room.turnUserId = leadId;
+          } else {
+            const curIdx = room.seats.findIndex((s) => s.userId === session.userId);
+            for (let offset = 1; offset <= room.seats.length; offset++) {
+              const cand = room.seats[(curIdx + offset) % room.seats.length];
+              if (!room.passedUserIds.has(cand.userId)) {
+                room.turnUserId = cand.userId;
+                break;
+              }
+            }
+          }
+          broadcastGameRoom(room);
+          return;
+        }
+
+        if (msg.type === 'game:caro_move') {
+          const room = session.gameRoomId ? gameRooms.get(session.gameRoomId) : null;
+          if (!room || room.gameType !== 'caro' || room.status !== 'playing') return;
+
+          const seatIdx = room.seats.findIndex((s) => s.userId === session.userId);
+          if (seatIdx === -1) {
+            sendJson(ws, 'game:error', { error: 'Bạn đang ở chế độ khán giả.' });
+            return;
+          }
+
+          const mySymbol: 'X' | 'O' = seatIdx === 0 ? 'X' : 'O';
+          if (room.caroTurn !== mySymbol) {
+            sendJson(ws, 'game:error', { error: `Chưa tới lượt quân ${mySymbol}!` });
+            return;
+          }
+
+          const index = Number(payload.index);
+          if (!Number.isInteger(index) || index < 0 || index >= 225 || room.caroBoard[index] !== null) {
+            return;
+          }
+
+          room.caroBoard[index] = mySymbol;
+          room.caroLastMove = index;
+
+          const winLine = checkCaroWin(room.caroBoard, index);
+          if (winLine) {
+            room.caroWinLine = winLine;
+            room.status = 'finished';
+            room.winnerUserId = session.userId;
+            room.winnerName = session.userName;
+            room.turnUserId = null;
+            room.chat.push({
+              id: `gc-${Date.now()}`,
+              sender: 'Hệ thống',
+              text: `${session.userName} (${mySymbol}) đã thắng 5 quân liên tiếp!`,
+              timestamp: nowTimeStr(),
+            });
+            broadcastGameRoom(room);
+            broadcastGameRoomList();
+            return;
+          }
+
+          if (room.caroBoard.every((cell) => cell !== null)) {
+            room.isDraw = true;
+            room.status = 'finished';
+            room.turnUserId = null;
+            broadcastGameRoom(room);
+            broadcastGameRoomList();
+            return;
+          }
+
+          room.caroTurn = mySymbol === 'X' ? 'O' : 'X';
+          room.turnUserId = room.seats[room.caroTurn === 'X' ? 0 : 1]?.userId || null;
+          broadcastGameRoom(room);
+          return;
+        }
+
+        if (msg.type === 'game:chat') {
+          const room = session.gameRoomId ? gameRooms.get(session.gameRoomId) : null;
+          if (!room) return;
+          const text = String(payload.text || '').trim().slice(0, 240);
+          if (!text) return;
+          room.chat.push({
+            id: `gc-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+            sender: session.userName,
+            text,
+            timestamp: nowTimeStr(),
+          });
+          broadcastGameRoom(room);
+          return;
+        }
       } catch {
         // Ignore malformed WebSocket packets
       }
@@ -1581,6 +2181,7 @@ async function bootstrap() {
       const session = clients.get(sessionUserId);
       if (!session) return;
       leaveKaraokeRoom(session);
+      leaveServerGameRoom(session);
       const prevYm = session.ymRoomId;
       clients.delete(sessionUserId);
       if (prevYm) {
