@@ -1,5 +1,6 @@
 import express from 'express';
 import http from 'http';
+import crypto from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -62,6 +63,7 @@ interface KaraokeRoom {
   singerName: string | null;
   singerRequests: string[];
   isMicLive: boolean;
+  hasMixedMusic: boolean;
   currentSong: RoomSong;
   customLyrics: string[];
   activeLyricLine: number;
@@ -685,6 +687,7 @@ function seedStarterRooms() {
     singerName: null,
     singerRequests: [],
     isMicLive: false,
+    hasMixedMusic: false,
     currentSong: DEFAULT_ROOM_SONG,
     customLyrics: DEFAULT_ROOM_SONG.lyrics,
     activeLyricLine: 0,
@@ -698,7 +701,7 @@ function seedStarterRooms() {
         id: 'rc-1',
         senderId: 'system',
         senderName: 'Hệ thống',
-        text: 'Chủ phòng có thể chọn thành viên lên hát, bật Mic kèm Echo Karaoke, hoặc chỉnh lời bài hát khác cho cả nhóm cùng xem!',
+        text: 'Chủ phòng có thể chọn thành viên lên hát, bật Mic kèm Echo & trộn nhạc YouTube trực tiếp tới cả phòng!',
         timestamp: '20:00',
       },
     ],
@@ -716,6 +719,7 @@ function seedStarterRooms() {
     singerName: null,
     singerRequests: [],
     isMicLive: false,
+    hasMixedMusic: false,
     currentSong: {
       id: 'song-6',
       youtubeId: 't4rjaYhmazo',
@@ -1048,6 +1052,7 @@ function serializeRoomSummary(room: KaraokeRoom) {
     singerId: room.singerId,
     singerName: room.singerName,
     isMicLive: room.isMicLive,
+    hasMixedMusic: room.hasMixedMusic,
     currentSong: room.currentSong,
     heartsTotal: room.heartsTotal,
     memberCount: room.members.size,
@@ -1066,6 +1071,7 @@ function serializeRoomDetail(room: KaraokeRoom) {
     singerName: room.singerName,
     singerRequests: room.singerRequests,
     isMicLive: room.isMicLive,
+    hasMixedMusic: room.hasMixedMusic,
     currentSong: room.currentSong,
     customLyrics: room.customLyrics,
     activeLyricLine: room.activeLyricLine,
@@ -1132,6 +1138,7 @@ function leaveKaraokeRoom(session: ClientSession) {
     room.singerId = null;
     room.singerName = null;
     room.isMicLive = false;
+    room.hasMixedMusic = false;
   }
 
   if (room.hostId === session.userId && room.members.size > 0) {
@@ -1235,17 +1242,151 @@ async function bootstrap() {
     }
   });
 
-  // Wallet & Heart Purchase API
+  // MoMo Payment Gateway API v2 State & Cryptographic Verification
+  interface MomoOrderRecord {
+    orderId: string;
+    requestId: string;
+    userId: string;
+    packageId: string;
+    hearts: number;
+    amountVnd: number;
+    status: 'pending' | 'paid' | 'failed';
+    transId?: string;
+    payUrl?: string;
+    qrCodeUrl?: string;
+    deeplink?: string;
+    createdAt: number;
+    paidAt?: number;
+  }
+
+  const momoOrders = new Map<string, MomoOrderRecord>();
+  const paidMomoOrderIds = new Set<string>();
+  const claimedGuestWallets = new Set<string>();
+
+  function getMomoConfig() {
+    const partnerCode = (process.env.MOMO_PARTNER_CODE || '').trim();
+    const accessKey = (process.env.MOMO_ACCESS_KEY || '').trim();
+    const secretKey = (process.env.MOMO_SECRET_KEY || '').trim();
+    const endpoint = (
+      process.env.MOMO_ENDPOINT || 'https://payment.momo.vn/v2/gateway/api/create'
+    ).trim();
+    const queryEndpoint = endpoint.replace('/create', '/query');
+    return {
+      configured: Boolean(partnerCode && accessKey && secretKey),
+      partnerCode,
+      accessKey,
+      secretKey,
+      endpoint,
+      queryEndpoint,
+    };
+  }
+
+  function signMomoHmac(rawSignature: string, secretKey: string): string {
+    return crypto.createHmac('sha256', secretKey).update(rawSignature).digest('hex');
+  }
+
+  function verifySafeHmac(expectedHex: string, actualHex: string): boolean {
+    if (!expectedHex || !actualHex || expectedHex.length !== actualHex.length) return false;
+    try {
+      return crypto.timingSafeEqual(Buffer.from(expectedHex, 'utf8'), Buffer.from(actualHex, 'utf8'));
+    } catch {
+      return false;
+    }
+  }
+
+  function resolveAppBaseUrl(req: express.Request): string {
+    const envUrl = (process.env.APP_URL || '').trim().replace(/\/+$/, '');
+    if (envUrl && /^https?:\/\//i.test(envUrl) && !envUrl.includes('MY_APP_URL')) {
+      return envUrl;
+    }
+    const protoHeader = String(req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0].trim();
+    const hostHeader = String(req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000').split(',')[0].trim();
+    const safeProto = protoHeader === 'https' || hostHeader.includes('.run.app') ? 'https' : 'http';
+    return `${safeProto}://${hostHeader}`;
+  }
+
+  function creditMomoOrderOnce(orderId: string, transId?: string): { ok: boolean; heartsBalance: number; heartsAdded: number } {
+    const order = momoOrders.get(orderId);
+    if (!order) return { ok: false, heartsBalance: 0, heartsAdded: 0 };
+    if (paidMomoOrderIds.has(orderId)) {
+      return { ok: true, heartsBalance: getOrInitWallet(order.userId), heartsAdded: 0 };
+    }
+    paidMomoOrderIds.add(orderId);
+    order.status = 'paid';
+    order.transId = transId || order.transId;
+    order.paidAt = Date.now();
+
+    const nextBalance = getOrInitWallet(order.userId) + order.hearts;
+    wallets.set(order.userId, nextBalance);
+
+    const session = clients.get(order.userId);
+    if (session) {
+      sendJson(session.ws, 'wallet:updated', { heartsBalance: nextBalance });
+      sendJson(session.ws, 'momo:order_paid', {
+        orderId: order.orderId,
+        heartsAdded: order.hearts,
+        heartsBalance: nextBalance,
+        transId: order.transId,
+      });
+    }
+    return { ok: true, heartsBalance: nextBalance, heartsAdded: order.hearts };
+  }
+
+  // Wallet & Real MoMo Payment API
   app.get('/api/wallet/:userId', (req, res) => {
     const balance = getOrInitWallet(req.params.userId);
     res.json({ userId: req.params.userId, heartsBalance: balance });
   });
 
-  app.post('/api/wallet/purchase', (req, res) => {
-    const { userId, packageId, paymentMethod } = req.body as {
+  app.post('/api/wallet/merge-guest', (req, res) => {
+    const { guestUserId, authUserId } = req.body as {
+      guestUserId?: string;
+      authUserId?: string;
+    };
+    const guestId = (guestUserId || '').trim();
+    const authId = (authUserId || '').trim();
+    if (
+      !guestId ||
+      !authId ||
+      guestId === authId ||
+      !guestId.startsWith('u-') ||
+      claimedGuestWallets.has(guestId)
+    ) {
+      res.json({ ok: true, heartsBalance: getOrInitWallet(authId || guestId) });
+      return;
+    }
+
+    claimedGuestWallets.add(guestId);
+    const guestBal = wallets.get(guestId) ?? 0;
+    const authCurrent = wallets.get(authId);
+    if (guestBal > 30) {
+      const merged = (authCurrent ?? 30) + (guestBal - 30);
+      wallets.set(authId, merged);
+      wallets.set(guestId, 30);
+    } else if (authCurrent === undefined) {
+      wallets.set(authId, guestBal || 30);
+    }
+
+    const finalBalance = getOrInitWallet(authId);
+    const session = clients.get(authId);
+    if (session) {
+      sendJson(session.ws, 'wallet:updated', { heartsBalance: finalBalance });
+    }
+    res.json({ ok: true, heartsBalance: finalBalance });
+  });
+
+  app.get('/api/momo/config', (_req, res) => {
+    const cfg = getMomoConfig();
+    res.json({
+      configured: cfg.configured,
+      environment: cfg.endpoint.includes('test-payment.momo.vn') ? 'sandbox' : 'production',
+    });
+  });
+
+  app.post('/api/momo/create', async (req, res) => {
+    const { userId, packageId } = req.body as {
       userId?: string;
       packageId?: string;
-      paymentMethod?: string;
     };
 
     if (!userId || !packageId || !HEART_PACKAGES[packageId]) {
@@ -1253,23 +1394,255 @@ async function bootstrap() {
       return;
     }
 
-    const pack = HEART_PACKAGES[packageId];
-    const current = getOrInitWallet(userId);
-    const nextBalance = current + pack.hearts;
-    wallets.set(userId, nextBalance);
+    const cfg = getMomoConfig();
+    if (!cfg.configured) {
+      res.status(503).json({
+        missingConfig: true,
+        requiredEnv: ['MOMO_PARTNER_CODE', 'MOMO_ACCESS_KEY', 'MOMO_SECRET_KEY'],
+        error:
+          'Cổng thanh toán MoMo chưa được cấu hình khóa đối tác trên máy chủ (MOMO_PARTNER_CODE, MOMO_ACCESS_KEY, MOMO_SECRET_KEY).',
+      });
+      return;
+    }
 
-    const session = clients.get(userId);
-    if (session) {
-      sendJson(session.ws, 'wallet:updated', { heartsBalance: nextBalance });
+    const pack = HEART_PACKAGES[packageId];
+    const orderId = `DKO_${Date.now()}_${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
+    const requestId = `REQ_${orderId}`;
+    const amount = String(pack.priceVnd);
+    const orderInfo = `Diep Khuc Online - Nap ${pack.hearts} Tim`;
+    const baseUrl = resolveAppBaseUrl(req);
+    const redirectUrl = `${baseUrl}/?momoReturn=1`;
+    const ipnUrl = `${baseUrl}/api/momo/ipn`;
+    const requestType = 'captureWallet';
+    const extraData = Buffer.from(JSON.stringify({ userId, packageId }), 'utf8').toString('base64');
+
+    const rawSignature =
+      `accessKey=${cfg.accessKey}&amount=${amount}&extraData=${extraData}&ipnUrl=${ipnUrl}` +
+      `&orderId=${orderId}&orderInfo=${orderInfo}&partnerCode=${cfg.partnerCode}` +
+      `&redirectUrl=${redirectUrl}&requestId=${requestId}&requestType=${requestType}`;
+
+    const signature = signMomoHmac(rawSignature, cfg.secretKey);
+
+    try {
+      const momoRes = await fetch(cfg.endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          partnerCode: cfg.partnerCode,
+          partnerName: 'Diep Khuc Online',
+          storeId: 'DiepKhucOnline',
+          requestId,
+          amount,
+          orderId,
+          orderInfo,
+          redirectUrl,
+          ipnUrl,
+          lang: 'vi',
+          requestType,
+          autoCapture: true,
+          extraData,
+          signature,
+        }),
+      });
+
+      const data = (await momoRes.json()) as {
+        resultCode?: number;
+        message?: string;
+        payUrl?: string;
+        qrCodeUrl?: string;
+        deeplink?: string;
+      };
+
+      if (!momoRes.ok || data.resultCode !== 0 || !data.payUrl) {
+        res.status(502).json({
+          error: data.message || `MoMo từ chối khởi tạo giao dịch (mã ${data.resultCode ?? momoRes.status}).`,
+        });
+        return;
+      }
+
+      const record: MomoOrderRecord = {
+        orderId,
+        requestId,
+        userId,
+        packageId,
+        hearts: pack.hearts,
+        amountVnd: pack.priceVnd,
+        status: 'pending',
+        payUrl: data.payUrl,
+        qrCodeUrl: data.qrCodeUrl,
+        deeplink: data.deeplink,
+        createdAt: Date.now(),
+      };
+      momoOrders.set(orderId, record);
+
+      res.json({
+        orderId,
+        amountVnd: pack.priceVnd,
+        hearts: pack.hearts,
+        payUrl: data.payUrl,
+        qrCodeUrl: data.qrCodeUrl || null,
+        deeplink: data.deeplink || null,
+      });
+    } catch {
+      res.status(502).json({ error: 'Không kết nối được tới máy chủ thanh toán MoMo.' });
+    }
+  });
+
+  // Official MoMo IPN Webhook (HMAC-SHA256 verified)
+  app.post('/api/momo/ipn', (req, res) => {
+    const cfg = getMomoConfig();
+    if (!cfg.configured) {
+      res.status(503).end();
+      return;
+    }
+    const body = req.body as Record<string, unknown>;
+    const partnerCode = String(body.partnerCode || '');
+    const orderId = String(body.orderId || '');
+    const requestId = String(body.requestId || '');
+    const amount = String(body.amount ?? '');
+    const orderInfo = String(body.orderInfo || '');
+    const orderType = String(body.orderType || '');
+    const transId = String(body.transId ?? '');
+    const resultCode = String(body.resultCode ?? '');
+    const message = String(body.message || '');
+    const payType = String(body.payType || '');
+    const responseTime = String(body.responseTime ?? '');
+    const extraData = String(body.extraData || '');
+    const signature = String(body.signature || '');
+
+    const rawSignature =
+      `accessKey=${cfg.accessKey}&amount=${amount}&extraData=${extraData}&message=${message}` +
+      `&orderId=${orderId}&orderInfo=${orderInfo}&orderType=${orderType}` +
+      `&partnerCode=${partnerCode}&payType=${payType}&requestId=${requestId}` +
+      `&responseTime=${responseTime}&resultCode=${resultCode}&transId=${transId}`;
+
+    const expectedSig = signMomoHmac(rawSignature, cfg.secretKey);
+    if (!verifySafeHmac(expectedSig, signature)) {
+      res.status(400).json({ error: 'Invalid MoMo signature' });
+      return;
+    }
+
+    const order = momoOrders.get(orderId);
+    if (!order || Number(amount) !== order.amountVnd) {
+      res.status(404).end();
+      return;
+    }
+
+    if (Number(resultCode) === 0) {
+      creditMomoOrderOnce(orderId, transId);
+    } else if (order.status === 'pending') {
+      order.status = 'failed';
+    }
+
+    res.status(204).end();
+  });
+
+  // Verify signed MoMo return parameters when user returns from MoMo checkout page
+  app.post('/api/momo/verify-return', (req, res) => {
+    const cfg = getMomoConfig();
+    if (!cfg.configured) {
+      res.status(503).json({ error: 'MoMo chưa được cấu hình trên máy chủ.' });
+      return;
+    }
+
+    const params = req.body as Record<string, string>;
+    const partnerCode = String(params.partnerCode || '');
+    const orderId = String(params.orderId || '');
+    const requestId = String(params.requestId || '');
+    const amount = String(params.amount || '');
+    const orderInfo = String(params.orderInfo || '');
+    const orderType = String(params.orderType || '');
+    const transId = String(params.transId || '');
+    const resultCode = String(params.resultCode || '');
+    const message = String(params.message || '');
+    const payType = String(params.payType || '');
+    const responseTime = String(params.responseTime || '');
+    const extraData = String(params.extraData || '');
+    const signature = String(params.signature || '');
+
+    const rawSignature =
+      `accessKey=${cfg.accessKey}&amount=${amount}&extraData=${extraData}&message=${message}` +
+      `&orderId=${orderId}&orderInfo=${orderInfo}&orderType=${orderType}` +
+      `&partnerCode=${partnerCode}&payType=${payType}&requestId=${requestId}` +
+      `&responseTime=${responseTime}&resultCode=${resultCode}&transId=${transId}`;
+
+    const expectedSig = signMomoHmac(rawSignature, cfg.secretKey);
+    if (!verifySafeHmac(expectedSig, signature)) {
+      res.status(400).json({ error: 'Chữ ký xác thực từ MoMo không hợp lệ.' });
+      return;
+    }
+
+    const order = momoOrders.get(orderId);
+    if (!order || Number(amount) !== order.amountVnd) {
+      res.status(404).json({ error: 'Không tìm thấy đơn hàng MoMo tương ứng.' });
+      return;
+    }
+
+    if (Number(resultCode) !== 0) {
+      if (order.status === 'pending') order.status = 'failed';
+      res.status(400).json({ error: message || 'Giao dịch MoMo chưa thành công.' });
+      return;
+    }
+
+    const result = creditMomoOrderOnce(orderId, transId);
+    res.json({
+      success: true,
+      orderId,
+      heartsAdded: result.heartsAdded || order.hearts,
+      heartsBalance: result.heartsBalance,
+      transId,
+    });
+  });
+
+  // Live MoMo transaction status query (supports QR scan polling)
+  app.get('/api/momo/order/:orderId', async (req, res) => {
+    const order = momoOrders.get(req.params.orderId);
+    if (!order) {
+      res.status(404).json({ error: 'Không tìm thấy mã đơn hàng.' });
+      return;
+    }
+
+    if (order.status === 'pending') {
+      const cfg = getMomoConfig();
+      if (cfg.configured) {
+        try {
+          const queryReqId = `Q_${Date.now()}`;
+          const rawSignature =
+            `accessKey=${cfg.accessKey}&orderId=${order.orderId}` +
+            `&partnerCode=${cfg.partnerCode}&requestId=${queryReqId}`;
+          const signature = signMomoHmac(rawSignature, cfg.secretKey);
+          const qRes = await fetch(cfg.queryEndpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              partnerCode: cfg.partnerCode,
+              requestId: queryReqId,
+              orderId: order.orderId,
+              lang: 'vi',
+              signature,
+            }),
+          });
+          if (qRes.ok) {
+            const qData = (await qRes.json()) as { resultCode?: number; transId?: number | string };
+            if (qData.resultCode === 0) {
+              creditMomoOrderOnce(order.orderId, String(qData.transId || ''));
+            } else if (qData.resultCode && qData.resultCode !== 1000 && qData.resultCode !== 7000) {
+              order.status = 'failed';
+            }
+          }
+        } catch {
+          // Keep pending on transient network glitch
+        }
+      }
     }
 
     res.json({
-      success: true,
-      heartsAdded: pack.hearts,
-      heartsBalance: nextBalance,
-      packageLabel: pack.label,
-      paymentMethod: paymentMethod || 'Ví nội bộ',
-      receiptId: `TX-${Date.now().toString().slice(-6)}`,
+      orderId: order.orderId,
+      status: order.status,
+      hearts: order.hearts,
+      amountVnd: order.amountVnd,
+      heartsBalance: getOrInitWallet(order.userId),
+      transId: order.transId || null,
     });
   });
 
@@ -1459,6 +1832,7 @@ async function bootstrap() {
       singerName: (hostName || 'Chủ phòng').trim(),
       singerRequests: [],
       isMicLive: false,
+      hasMixedMusic: false,
       currentSong: initialSong,
       customLyrics: initialSong.lyrics || [],
       activeLyricLine: 0,
@@ -1670,6 +2044,7 @@ async function bootstrap() {
           room.singerId = session.userId;
           room.singerName = session.userName;
           room.isMicLive = Boolean(payload.isMicLive);
+          room.hasMixedMusic = room.isMicLive && Boolean(payload.hasMixedMusic);
           room.singerRequests = room.singerRequests.filter((id) => id !== session.userId);
 
           for (const m of room.members.values()) {
@@ -1696,6 +2071,7 @@ async function bootstrap() {
           room.singerId = null;
           room.singerName = null;
           room.isMicLive = false;
+          room.hasMixedMusic = false;
           const m = room.members.get(session.userId);
           if (m) m.isMicLive = false;
 
@@ -1708,6 +2084,7 @@ async function bootstrap() {
           const room = session.karaokeRoomId ? rooms.get(session.karaokeRoomId) : null;
           if (!room || room.singerId !== session.userId) return;
           room.isMicLive = Boolean(payload.isMicLive);
+          room.hasMixedMusic = room.isMicLive && Boolean(payload.hasMixedMusic);
           const m = room.members.get(session.userId);
           if (m) m.isMicLive = room.isMicLive;
           broadcastRoom(room.id, 'room:state', { room: serializeRoomDetail(room) });

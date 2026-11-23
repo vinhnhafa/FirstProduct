@@ -93,6 +93,9 @@ export function updateDocumentSeo(opts: {
 
   if (opts.path && typeof window !== 'undefined') {
     try {
+      if (window.location.search.includes('momoReturn=')) {
+        return;
+      }
       if (window.location.pathname !== opts.path) {
         window.history.replaceState(null, '', opts.path);
       }

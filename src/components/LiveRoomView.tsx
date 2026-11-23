@@ -116,19 +116,26 @@ export function LiveRoomView({
     hearts: number;
   } | null>(null);
 
-  // WebRTC Mic Broadcaster with Karaoke Echo + Listener Audio
+  // WebRTC Mic + Live YouTube Music Mixer + Listener Audio
   const [isMicOn, setIsMicOn] = useState(false);
+  const [isMusicMixed, setIsMusicMixed] = useState(false);
   const [micLevel, setMicLevel] = useState(0);
   const [echoAmount, setEchoAmount] = useState(35); // 0..70%
   const [micGainLevel, setMicGainLevel] = useState(110); // 50..160%
+  const [musicMixLevel, setMusicMixLevel] = useState(85); // 0..120%
   const [loopbackOn, setLoopbackOn] = useState(false);
   const [listenerMicVolume, setListenerMicVolume] = useState(90);
   const [listenerMicMuted, setListenerMicMuted] = useState(false);
+  const [listenerYtVolume, setListenerYtVolume] = useState(85);
   const [hasRemoteAudio, setHasRemoteAudio] = useState(false);
+  const [ytPlaybackBlocked, setYtPlaybackBlocked] = useState(false);
 
   const rawMicStreamRef = useRef<MediaStream | null>(null);
+  const tabAudioStreamRef = useRef<MediaStream | null>(null);
   const processedStreamRef = useRef<MediaStream | null>(null);
+  const audioDestinationRef = useRef<MediaStreamAudioDestinationNode | null>(null);
   const micGainNodeRef = useRef<GainNode | null>(null);
+  const musicMixGainNodeRef = useRef<GainNode | null>(null);
   const echoFeedbackNodeRef = useRef<GainNode | null>(null);
   const echoWetNodeRef = useRef<GainNode | null>(null);
 
@@ -145,6 +152,10 @@ export function LiveRoomView({
     playVideo: () => void;
     pauseVideo: () => void;
     seekTo: (s: number, allow?: boolean) => void;
+    setVolume: (v: number) => void;
+    mute: () => void;
+    unMute: () => void;
+    getPlayerState?: () => number;
     getCurrentTime: () => number;
     destroy: () => void;
   } | null>(null);
@@ -187,11 +198,30 @@ export function LiveRoomView({
     }
   }, []);
 
+  const stopTabMusicCapture = useCallback(() => {
+    if (tabAudioStreamRef.current) {
+      for (const track of tabAudioStreamRef.current.getTracks()) {
+        track.stop();
+      }
+      tabAudioStreamRef.current = null;
+    }
+    if (musicMixGainNodeRef.current) {
+      try {
+        musicMixGainNodeRef.current.disconnect();
+      } catch {
+        // Ignore
+      }
+      musicMixGainNodeRef.current = null;
+    }
+    setIsMusicMixed(false);
+  }, []);
+
   const stopLocalMic = useCallback(() => {
     if (animFrameRef.current !== null) {
       cancelAnimationFrame(animFrameRef.current);
       animFrameRef.current = null;
     }
+    stopTabMusicCapture();
     if (audioCtxRef.current) {
       audioCtxRef.current.close().catch(() => {});
       audioCtxRef.current = null;
@@ -203,6 +233,7 @@ export function LiveRoomView({
       rawMicStreamRef.current = null;
     }
     processedStreamRef.current = null;
+    audioDestinationRef.current = null;
     micGainNodeRef.current = null;
     echoFeedbackNodeRef.current = null;
     echoWetNodeRef.current = null;
@@ -212,14 +243,20 @@ export function LiveRoomView({
     setIsMicOn(false);
     setMicLevel(0);
     setLoopbackOn(false);
-  }, []);
+  }, [stopTabMusicCapture]);
 
-  // Update live Echo & Gain nodes dynamically while singing
+  // Update live Echo, Mic Gain & Music Mix Gain nodes dynamically while singing
   useEffect(() => {
     if (micGainNodeRef.current) {
       micGainNodeRef.current.gain.value = micGainLevel / 100;
     }
   }, [micGainLevel]);
+
+  useEffect(() => {
+    if (musicMixGainNodeRef.current) {
+      musicMixGainNodeRef.current.gain.value = musicMixLevel / 100;
+    }
+  }, [musicMixLevel]);
 
   useEffect(() => {
     const ratio = echoAmount / 100;
@@ -326,8 +363,20 @@ export function LiveRoomView({
           if (Math.abs((ytPlayerRef.current.getCurrentTime?.() || 0) - positionSeconds) > 3) {
             ytPlayerRef.current.seekTo(positionSeconds, true);
           }
-          if (isPlaying) ytPlayerRef.current.playVideo();
-          else ytPlayerRef.current.pauseVideo();
+          if (isPlaying) {
+            ytPlayerRef.current.playVideo();
+            window.setTimeout(() => {
+              const st = ytPlayerRef.current?.getPlayerState?.();
+              if (activeRoomRef.current?.isPlaying && st !== 1 && st !== 3) {
+                setYtPlaybackBlocked(true);
+              } else {
+                setYtPlaybackBlocked(false);
+              }
+            }, 900);
+          } else {
+            ytPlayerRef.current.pauseVideo();
+            setYtPlaybackBlocked(false);
+          }
         }
       } else if (type === 'room:lyrics_synced') {
         const customLyrics = Array.isArray(payload.customLyrics)
@@ -441,7 +490,25 @@ export function LiveRoomView({
           onReady: (e) => {
             if (!mounted) return;
             ytReadyRef.current = true;
-            if (activeRoom.isPlaying) e.target.playVideo();
+            e.target.setVolume?.(listenerYtVolume);
+            if (activeRoom.isPlaying) {
+              if (activeRoom.positionSeconds > 2) {
+                e.target.seekTo(activeRoom.positionSeconds, true);
+              }
+              e.target.playVideo();
+              window.setTimeout(() => {
+                const st = e.target.getPlayerState?.();
+                if (activeRoomRef.current?.isPlaying && st !== 1 && st !== 3) {
+                  setYtPlaybackBlocked(true);
+                }
+              }, 900);
+            }
+          },
+          onStateChange: (e) => {
+            if (!mounted) return;
+            if (e.data === 1) {
+              setYtPlaybackBlocked(false);
+            }
           },
           onError: () => {
             if (!mounted) return;
@@ -521,6 +588,22 @@ export function LiveRoomView({
       remoteAudioRef.current.volume = listenerMicMuted ? 0 : listenerMicVolume / 100;
     }
   }, [listenerMicVolume, listenerMicMuted]);
+
+  // Prevent double-music echo: when singer streams mixed Vocal+Beat over WebRTC, mute listener's local YT iframe
+  useEffect(() => {
+    if (!ytReadyRef.current || !ytPlayerRef.current || !activeRoom) return;
+    const isCurrentSinger = activeRoom.singerId === userId;
+    try {
+      if (!isCurrentSinger && activeRoom.hasMixedMusic && hasRemoteAudio) {
+        ytPlayerRef.current.mute();
+      } else {
+        ytPlayerRef.current.unMute();
+        ytPlayerRef.current.setVolume(listenerYtVolume);
+      }
+    } catch {
+      // Ignore transient YT state
+    }
+  }, [activeRoom?.hasMixedMusic, activeRoom?.singerId, userId, hasRemoteAudio, listenerYtVolume]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -638,12 +721,77 @@ export function LiveRoomView({
     onToast('Bạn đã trả Mic về phòng.', 'info');
   };
 
-  const handleToggleBroadcastMic = async () => {
+  const attachTabMusicToMixer = async (): Promise<boolean> => {
+    const ctx = audioCtxRef.current;
+    const destination = audioDestinationRef.current;
+    if (!ctx || !destination) return false;
+
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      onToast(
+        'Trình duyệt trên thiết bị này không hỗ trợ thu âm thanh tab YouTube. Khán giả sẽ nghe nhạc YouTube đồng bộ trực tiếp.',
+        'warning'
+      );
+      return false;
+    }
+
+    try {
+      const displayStream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        } as MediaTrackConstraints,
+        preferCurrentTab: true,
+      } as DisplayMediaStreamOptions);
+
+      // Stop video track immediately — we only mix the YouTube tab audio track!
+      for (const vt of displayStream.getVideoTracks()) {
+        vt.stop();
+      }
+
+      const audioTracks = displayStream.getAudioTracks();
+      if (audioTracks.length === 0) {
+        onToast(
+          'Bạn chưa tích chọn "Chia sẻ âm thanh tab (Share tab audio)". Hãy thử lại và bật tùy chọn âm thanh!',
+          'warning'
+        );
+        return false;
+      }
+
+      stopTabMusicCapture();
+      const tabOnlyStream = new MediaStream(audioTracks);
+      tabAudioStreamRef.current = tabOnlyStream;
+
+      const tabSource = ctx.createMediaStreamSource(tabOnlyStream);
+      const musicGain = ctx.createGain();
+      musicGain.gain.value = musicMixLevel / 100;
+      musicMixGainNodeRef.current = musicGain;
+
+      tabSource.connect(musicGain);
+      musicGain.connect(destination);
+
+      audioTracks[0].onended = () => {
+        stopTabMusicCapture();
+        sendEvent('room:mic_status', { isMicLive: true, hasMixedMusic: false });
+        onToast('Đã ngắt trộn nhạc YouTube — chỉ còn phát giọng Mic.', 'info');
+      };
+
+      setIsMusicMixed(true);
+      sendEvent('room:mic_status', { isMicLive: true, hasMixedMusic: true });
+      return true;
+    } catch {
+      onToast('Chưa cấp quyền thu âm thanh tab YouTube.', 'warning');
+      return false;
+    }
+  };
+
+  const handleToggleBroadcastMic = async (withMusicMix = false) => {
     if (!activeRoom) return;
     if (isMicOn) {
       stopLocalMic();
       stopAllRtc();
-      sendEvent('room:mic_status', { isMicLive: false });
+      sendEvent('room:mic_status', { isMicLive: false, hasMixedMusic: false });
       onToast('Đã tắt phát âm thanh Mic.', 'info');
       return;
     }
@@ -658,7 +806,7 @@ export function LiveRoomView({
       });
       rawMicStreamRef.current = rawStream;
 
-      // Build Karaoke Vocal Processing Chain (Mic Gain + Warm Echo Delay) -> WebRTC Stream
+      // Build Karaoke Vocal Processing Chain (Mic Gain + Warm Echo Delay) -> WebRTC Mixer Destination
       const AudioCtx =
         window.AudioContext ||
         (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
@@ -686,11 +834,12 @@ export function LiveRoomView({
       echoWetNodeRef.current = wetGain;
 
       const destination = ctx.createMediaStreamDestination();
+      audioDestinationRef.current = destination;
 
       source.connect(micGain);
-      // Dry path
+      // Dry vocal path
       micGain.connect(destination);
-      // Echo wet path
+      // Echo wet vocal path
       micGain.connect(delay);
       delay.connect(lowpass);
       lowpass.connect(feedback);
@@ -716,12 +865,17 @@ export function LiveRoomView({
       };
       tick();
 
+      let mixedOk = false;
+      if (withMusicMix) {
+        mixedOk = await attachTabMusicToMixer();
+      }
+
       setIsMicOn(true);
 
       if (activeRoom.singerId !== userId) {
-        sendEvent('room:claim_mic', { isMicLive: true });
+        sendEvent('room:claim_mic', { isMicLive: true, hasMixedMusic: mixedOk });
       } else {
-        sendEvent('room:mic_status', { isMicLive: true });
+        sendEvent('room:mic_status', { isMicLive: true, hasMixedMusic: mixedOk });
       }
 
       for (const member of activeRoom.members) {
@@ -731,11 +885,50 @@ export function LiveRoomView({
       }
 
       onToast(
-        'Mic Karaoke (kèm Echo) đang phát trực tiếp! Mọi người trong nhóm đều nghe được giọng hát của bạn.',
+        mixedOk
+          ? 'Đang phát trực tiếp GIỌNG HÁT + NHẠC YOUTUBE trộn chung tới cả phòng!'
+          : 'Mic Karaoke (kèm Echo) đang phát trực tiếp! Bấm "Trộn nhạc YouTube" nếu muốn phát kèm nhạc nền qua Mic.',
         'success'
       );
     } catch {
       onToast('Trình duyệt chưa cấp quyền Microphone hoặc không tìm thấy thiết bị Mic.', 'warning');
+    }
+  };
+
+  const handleToggleMusicMix = async () => {
+    if (!isMicOn) {
+      await handleToggleBroadcastMic(true);
+      return;
+    }
+    if (isMusicMixed) {
+      stopTabMusicCapture();
+      sendEvent('room:mic_status', { isMicLive: true, hasMixedMusic: false });
+      onToast('Đã tắt trộn nhạc YouTube vào luồng Mic.', 'info');
+    } else {
+      const ok = await attachTabMusicToMixer();
+      if (ok) {
+        onToast('Đã trộn thành công nhạc YouTube + Giọng hát phát chung tới cả phòng!', 'success');
+      }
+    }
+  };
+
+  const handleUnlockListenerAudio = () => {
+    try {
+      if (ytReadyRef.current && ytPlayerRef.current) {
+        if (!activeRoom?.hasMixedMusic || !hasRemoteAudio) {
+          ytPlayerRef.current.unMute();
+          ytPlayerRef.current.setVolume(listenerYtVolume);
+        }
+        ytPlayerRef.current.playVideo();
+      }
+      if (remoteAudioRef.current) {
+        remoteAudioRef.current.volume = listenerMicMuted ? 0 : listenerMicVolume / 100;
+        remoteAudioRef.current.play().catch(() => {});
+      }
+      setYtPlaybackBlocked(false);
+      onToast('Đã bật âm thanh Nhạc YouTube & Giọng Ca sĩ!', 'success');
+    } catch {
+      // Ignore
     }
   };
 
@@ -1173,6 +1366,19 @@ export function LiveRoomView({
           <div className="relative aspect-video rounded-2xl overflow-hidden bg-black border border-slate-800 shadow-2xl">
             <div ref={ytHostRef} className="w-full h-full" />
 
+            {ytPlaybackBlocked && activeRoom.isPlaying && !isSinger && (
+              <div className="absolute inset-x-0 bottom-4 z-30 flex justify-center px-4">
+                <button
+                  type="button"
+                  onClick={handleUnlockListenerAudio}
+                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs sm:text-sm shadow-2xl animate-pulse cursor-pointer"
+                >
+                  <Volume2 className="w-4 h-4" />
+                  <span>Bấm để bật Nhạc YouTube & Tiếng Ca sĩ cùng lúc</span>
+                </button>
+              </div>
+            )}
+
             {giftBanner && (
               <div className="absolute top-4 left-4 right-4 sm:right-auto z-20 pointer-events-none">
                 <div className="inline-flex items-center gap-2.5 px-4 py-2 rounded-xl bg-gradient-to-r from-rose-600/95 to-amber-500/95 text-white shadow-xl text-xs sm:text-sm font-bold">
@@ -1360,7 +1566,7 @@ export function LiveRoomView({
                   <>
                     <button
                       type="button"
-                      onClick={handleToggleBroadcastMic}
+                      onClick={() => handleToggleBroadcastMic(false)}
                       className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg font-semibold text-xs transition-colors cursor-pointer ${
                         isMicOn
                           ? 'bg-rose-600 hover:bg-rose-500 text-white'
@@ -1369,6 +1575,26 @@ export function LiveRoomView({
                     >
                       {isMicOn ? <MicOff className="w-3.5 h-3.5" /> : <Mic className="w-3.5 h-3.5" />}
                       <span>{isMicOn ? 'Tắt Mic Phát Live' : 'Bật Mic Phát Trực Tiếp'}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleToggleMusicMix}
+                      className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-lg font-semibold text-xs border transition-colors cursor-pointer ${
+                        isMusicMixed
+                          ? 'bg-purple-600 border-purple-400 text-white'
+                          : 'bg-purple-500/15 hover:bg-purple-500/25 border-purple-500/40 text-purple-200'
+                      }`}
+                      title="Thu âm thanh YouTube từ tab trình duyệt và trộn chung với giọng Mic gửi qua WebRTC"
+                    >
+                      <Music2 className="w-3.5 h-3.5" />
+                      <span>
+                        {isMusicMixed
+                          ? 'Đang trộn Nhạc + Mic'
+                          : isMicOn
+                            ? 'Trộn thêm Nhạc YouTube'
+                            : 'Hát + Trộn Nhạc YouTube'}
+                      </span>
                     </button>
 
                     {isMicOn && (
@@ -1410,38 +1636,68 @@ export function LiveRoomView({
               </div>
 
               {!isSinger && (
-                <div className="flex items-center gap-2 bg-slate-900/90 border border-slate-800 px-3 py-1.5 rounded-lg">
-                  <button
-                    type="button"
-                    onClick={() => setListenerMicMuted((v) => !v)}
-                    className="text-slate-300 hover:text-amber-400 cursor-pointer"
-                    aria-label="Tắt/Bật tiếng ca sĩ"
-                  >
-                    {listenerMicMuted ? (
-                      <VolumeX className="w-4 h-4 text-rose-400" />
-                    ) : (
-                      <Volume2 className="w-4 h-4 text-emerald-400" />
-                    )}
-                  </button>
-                  <span className="text-xs text-slate-300 whitespace-nowrap">
-                    {hasRemoteAudio ? 'Đang nghe Ca sĩ (Live)' : 'Âm lượng Ca sĩ'}
-                  </span>
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    value={listenerMicMuted ? 0 : listenerMicVolume}
-                    onChange={(e) => {
-                      setListenerMicVolume(Number(e.target.value));
-                      if (listenerMicMuted) setListenerMicMuted(false);
-                    }}
-                    className="karaoke-range w-20"
-                  />
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex items-center gap-2 bg-slate-900/90 border border-slate-800 px-3 py-1.5 rounded-lg">
+                    <button
+                      type="button"
+                      onClick={() => setListenerMicMuted((v) => !v)}
+                      className="text-slate-300 hover:text-amber-400 cursor-pointer"
+                      aria-label="Tắt/Bật tiếng ca sĩ"
+                    >
+                      {listenerMicMuted ? (
+                        <VolumeX className="w-4 h-4 text-rose-400" />
+                      ) : (
+                        <Volume2 className="w-4 h-4 text-emerald-400" />
+                      )}
+                    </button>
+                    <span className="text-xs text-slate-300 whitespace-nowrap">
+                      {hasRemoteAudio
+                        ? activeRoom.hasMixedMusic
+                          ? 'Giọng + Nhạc Live'
+                          : 'Ca sĩ (Live)'
+                        : 'Âm lượng Ca sĩ'}
+                    </span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={listenerMicMuted ? 0 : listenerMicVolume}
+                      onChange={(e) => {
+                        setListenerMicVolume(Number(e.target.value));
+                        if (listenerMicMuted) setListenerMicMuted(false);
+                      }}
+                      className="karaoke-range w-20"
+                    />
+                  </div>
+
+                  {(!activeRoom.hasMixedMusic || !hasRemoteAudio) && (
+                    <div className="flex items-center gap-2 bg-slate-900/90 border border-slate-800 px-3 py-1.5 rounded-lg">
+                      <Music2 className="w-3.5 h-3.5 text-amber-400" />
+                      <span className="text-xs text-slate-300 whitespace-nowrap">Nhạc YouTube</span>
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        value={listenerYtVolume}
+                        onChange={(e) => {
+                          const v = Number(e.target.value);
+                          setListenerYtVolume(v);
+                          try {
+                            ytPlayerRef.current?.unMute();
+                            ytPlayerRef.current?.setVolume(v);
+                          } catch {
+                            // Ignore
+                          }
+                        }}
+                        className="karaoke-range w-20"
+                      />
+                    </div>
+                  )}
                 </div>
               )}
             </div>
 
-            {/* Karaoke Vocal Echo & Gain Sliders for Chosen Singer */}
+            {/* Karaoke Vocal Echo, Mic Gain & YouTube Beat Mix Sliders for Chosen Singer */}
             {isSinger && isMicOn && (
               <div className="pt-2 border-t border-slate-800/70 flex flex-wrap items-center gap-5 text-xs">
                 <div className="flex items-center gap-2">
@@ -1469,6 +1725,21 @@ export function LiveRoomView({
                   />
                   <span className="font-mono text-emerald-300 tabular-nums">{micGainLevel}%</span>
                 </div>
+
+                {isMusicMixed && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-purple-300">Nhạc YouTube truyền đi:</span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={120}
+                      value={musicMixLevel}
+                      onChange={(e) => setMusicMixLevel(Number(e.target.value))}
+                      className="karaoke-range w-24"
+                    />
+                    <span className="font-mono text-purple-300 tabular-nums">{musicMixLevel}%</span>
+                  </div>
+                )}
               </div>
             )}
           </div>

@@ -16,7 +16,10 @@ import {
   Loader2,
   Filter,
   Headphones,
+  LogIn,
+  User as UserIcon,
 } from 'lucide-react';
+import type { User as FirebaseUser } from 'firebase/auth';
 import { AppView, Song } from '../types/karaoke';
 import { extractYouTubeId, formatTime, removeVietnameseTones } from '../utils/vietnamese';
 
@@ -26,9 +29,12 @@ interface HeaderProps {
   activeView: AppView;
   isTvMode: boolean;
   heartsBalance: number;
+  firebaseUser: FirebaseUser | null;
+  userDisplayName: string;
   onChangeView: (view: AppView) => void;
   onToggleTvMode: () => void;
   onOpenHeartStore: () => void;
+  onOpenAuthModal: () => void;
   onAddToQueue: (song: Song) => void;
   onPrioritizeSong: (song: Song) => void;
   onPlayNow: (song: Song) => void;
@@ -40,9 +46,12 @@ export function Header({
   activeView,
   isTvMode,
   heartsBalance,
+  firebaseUser,
+  userDisplayName,
   onChangeView,
   onToggleTvMode,
   onOpenHeartStore,
+  onOpenAuthModal,
   onAddToQueue,
   onPrioritizeSong,
   onPlayNow,
@@ -348,22 +357,53 @@ export function Header({
           )}
         </div>
 
-        <button
-          type="button"
-          onClick={onToggleTvMode}
-          className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-            isTvMode
-              ? 'bg-amber-500 text-slate-950 hover:bg-amber-400'
-              : 'bg-slate-800/90 hover:bg-slate-700 text-slate-100 border border-slate-700'
-          }`}
-          aria-pressed={isTvMode}
-        >
-          {isTvMode ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
-          <span className="hidden sm:inline">
-            {isTvMode ? 'Thoát TV Mode' : 'Toàn màn hình (TV Mode)'}
-          </span>
-          <span className="sm:hidden">{isTvMode ? 'Thoát TV' : 'TV Mode'}</span>
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={onOpenAuthModal}
+            className={`inline-flex items-center gap-2 px-3 py-2 rounded-lg text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              firebaseUser
+                ? 'bg-slate-800/95 hover:bg-slate-700 text-slate-100 border border-emerald-500/40'
+                : 'bg-white/95 hover:bg-white text-slate-900'
+            }`}
+          >
+            {firebaseUser ? (
+              firebaseUser.photoURL ? (
+                <img
+                  src={firebaseUser.photoURL}
+                  alt={userDisplayName}
+                  referrerPolicy="no-referrer"
+                  className="w-5 h-5 rounded-full object-cover"
+                />
+              ) : (
+                <UserIcon className="w-4 h-4 text-emerald-400" />
+              )
+            ) : (
+              <LogIn className="w-4 h-4 text-slate-800" />
+            )}
+            <span className="max-w-[110px] truncate hidden md:inline">
+              {firebaseUser ? userDisplayName : 'Đăng nhập'}
+            </span>
+            <span className="md:hidden">{firebaseUser ? 'Tài khoản' : 'Đăng nhập'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onToggleTvMode}
+            className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              isTvMode
+                ? 'bg-amber-500 text-slate-950 hover:bg-amber-400'
+                : 'bg-slate-800/90 hover:bg-slate-700 text-slate-100 border border-slate-700'
+            }`}
+            aria-pressed={isTvMode}
+          >
+            {isTvMode ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+            <span className="hidden sm:inline">
+              {isTvMode ? 'Thoát TV Mode' : 'Toàn màn hình (TV Mode)'}
+            </span>
+            <span className="sm:hidden">{isTvMode ? 'Thoát TV' : 'TV Mode'}</span>
+          </button>
+        </div>
       </div>
 
       {!isTvMode && (

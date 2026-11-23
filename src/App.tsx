@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Spade, Grid3X3 } from 'lucide-react';
+import { onAuthStateChanged, type User as FirebaseUser } from 'firebase/auth';
+import { auth, syncUserProfileToFirestore } from './lib/firebase';
 import { KARAOKE_SONGS } from './data/songs';
 import {
   AppView,
@@ -23,6 +25,7 @@ import { BrowseCatalogPage } from './components/BrowseCatalogPage';
 import { MusicListenPage } from './components/MusicListenPage';
 import { LiveRoomView } from './components/LiveRoomView';
 import { HeartStoreModal } from './components/HeartStoreModal';
+import { AuthModal } from './components/AuthModal';
 import { YahooChat } from './components/YahooChat';
 import { TienLenGame } from './components/TienLenGame';
 import { CaroGame } from './components/CaroGame';
@@ -115,7 +118,22 @@ export default function App() {
     return parseMediaUrlPath(window.location.pathname);
   }, []);
 
-  const [userId] = useState<string>(getOrCreateUserId);
+  const initialMomoReturnParams = useMemo(() => {
+    if (typeof window === 'undefined') return null;
+    const sp = new URLSearchParams(window.location.search);
+    if (sp.get('momoReturn') !== '1' || !sp.get('orderId') || !sp.get('signature')) {
+      return null;
+    }
+    const obj: Record<string, string> = {};
+    sp.forEach((value, key) => {
+      obj[key] = value;
+    });
+    return obj;
+  }, []);
+
+  const [guestUserId] = useState<string>(getOrCreateUserId);
+  const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [nickname, setNickname] = useState<string>(getInitialNickname);
   const [activeView, setActiveView] = useState<AppView>(() =>
     initialRoute?.kind === 'mp3' ? 'music' : 'stage'
@@ -155,10 +173,23 @@ export default function App() {
   const [isHeartStoreOpen, setIsHeartStoreOpen] = useState(false);
   const [roomCreateSong, setRoomCreateSong] = useState<Song | null>(null);
 
+  const userId = firebaseUser?.uid || guestUserId;
+  const effectiveNickname = useMemo(() => {
+    if (firebaseUser) {
+      if (nickname && nickname !== 'ca_si_online') return nickname;
+      return (
+        firebaseUser.displayName ||
+        firebaseUser.email?.split('@')[0] ||
+        'Ca sĩ Online'
+      ).slice(0, 28);
+    }
+    return nickname;
+  }, [firebaseUser, nickname]);
+
   const queueRef = useRef<QueueItem[]>(queue);
   queueRef.current = queue;
 
-  const { connected, sendEvent, subscribe } = useRealtimeSocket(userId, nickname);
+  const { connected, sendEvent, subscribe } = useRealtimeSocket(userId, effectiveNickname);
 
   const blockedSet = useMemo(() => new Set(blockedIds), [blockedIds]);
   const visibleCatalog = useMemo(
@@ -180,6 +211,64 @@ export default function App() {
   const dismissToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
+
+  // Observe Firebase Authentication state (Google / Email sign-in) & merge guest wallet
+  useEffect(() => {
+    const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
+      setFirebaseUser(user);
+      if (user) {
+        syncUserProfileToFirestore(user).catch(() => {});
+        fetch('/api/wallet/merge-guest', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ guestUserId, authUserId: user.uid }),
+        })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((d: { heartsBalance?: number } | null) => {
+            if (typeof d?.heartsBalance === 'number') {
+              setHeartsBalance(d.heartsBalance);
+            }
+          })
+          .catch(() => {});
+      }
+    });
+    return () => unsubscribeAuth();
+  }, [guestUserId]);
+
+  // Verify signed MoMo return redirect query params once on mount
+  const momoVerifiedRef = useRef(false);
+  useEffect(() => {
+    if (!initialMomoReturnParams || momoVerifiedRef.current) return;
+    momoVerifiedRef.current = true;
+    fetch('/api/momo/verify-return', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(initialMomoReturnParams),
+    })
+      .then(async (r) => ({ ok: r.ok, data: (await r.json()) as { heartsAdded?: number; heartsBalance?: number; error?: string } }))
+      .then(({ ok, data }) => {
+        if (ok && typeof data.heartsBalance === 'number') {
+          setHeartsBalance(data.heartsBalance);
+          addToast(
+            `Thanh toán MoMo thành công! Đã cộng +${data.heartsAdded || 0} Tim vào ví.`,
+            'success'
+          );
+        } else {
+          addToast(data.error || 'Giao dịch MoMo chưa hoàn tất.', 'warning');
+        }
+      })
+      .catch(() => {
+        addToast('Không thể xác thực kết quả thanh toán MoMo.', 'warning');
+      })
+      .finally(() => {
+        try {
+          const cleanPath = buildSongUrlPath(currentSong.title, currentSong.youtubeId, 'karaoke');
+          window.history.replaceState(null, '', cleanPath);
+        } catch {
+          // Ignore
+        }
+      });
+  }, [initialMomoReturnParams, addToast, currentSong.title, currentSong.youtubeId]);
 
   // Load wallet, rooms & weekly leaderboard initially via REST and keep synced via WebSocket
   useEffect(() => {
@@ -532,9 +621,12 @@ export default function App() {
         activeView={activeView}
         isTvMode={isTvMode}
         heartsBalance={heartsBalance}
+        firebaseUser={firebaseUser}
+        userDisplayName={effectiveNickname}
         onChangeView={setActiveView}
         onToggleTvMode={handleToggleTvMode}
         onOpenHeartStore={() => setIsHeartStoreOpen(true)}
+        onOpenAuthModal={() => setIsAuthModalOpen(true)}
         onAddToQueue={handleAddToQueue}
         onPrioritizeSong={handlePrioritizeSong}
         onPlayNow={handlePlayNow}
@@ -604,7 +696,7 @@ export default function App() {
         {!isTvMode && activeView === 'rooms' && (
           <LiveRoomView
             userId={userId}
-            userName={nickname}
+            userName={effectiveNickname}
             songs={visibleCatalog}
             blockedYoutubeIds={blockedSet}
             initialSongForCreate={roomCreateSong}
@@ -669,7 +761,7 @@ export default function App() {
               <div className="lg:col-span-5">
                 <YahooChat
                   userId={userId}
-                  nickname={nickname}
+                  nickname={effectiveNickname}
                   onNicknameChange={handleNicknameChange}
                   currentSong={currentSong}
                   incomingSharedSong={sharedToChat}
@@ -685,7 +777,7 @@ export default function App() {
                 {activeGame === 'tien-len' ? (
                   <TienLenGame
                     userId={userId}
-                    userName={nickname}
+                    userName={effectiveNickname}
                     rooms={gameRooms}
                     connected={connected}
                     sendEvent={sendEvent}
@@ -695,7 +787,7 @@ export default function App() {
                 ) : (
                   <CaroGame
                     userId={userId}
-                    userName={nickname}
+                    userName={effectiveNickname}
                     rooms={gameRooms}
                     connected={connected}
                     sendEvent={sendEvent}
@@ -717,8 +809,18 @@ export default function App() {
         isOpen={isHeartStoreOpen}
         userId={userId}
         heartsBalance={heartsBalance}
+        subscribe={subscribe}
         onClose={() => setIsHeartStoreOpen(false)}
         onBalanceUpdated={setHeartsBalance}
+        onToast={addToast}
+      />
+
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        firebaseUser={firebaseUser}
+        currentNickname={effectiveNickname}
+        onClose={() => setIsAuthModalOpen(false)}
+        onNicknameChange={handleNicknameChange}
         onToast={addToast}
       />
 

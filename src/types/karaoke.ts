@@ -109,6 +109,7 @@ export interface LiveRoomSummary {
   singerId: string | null;
   singerName: string | null;
   isMicLive: boolean;
+  hasMixedMusic?: boolean;
   currentSong: Song;
   heartsTotal: number;
   memberCount: number;
@@ -125,6 +126,7 @@ export interface LiveRoomDetail {
   singerName: string | null;
   singerRequests: string[];
   isMicLive: boolean;
+  hasMixedMusic?: boolean;
   currentSong: Song;
   customLyrics: string[];
   activeLyricLine: number;

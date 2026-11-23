@@ -83,6 +83,17 @@ export function useRealtimeSocket(userId: string, userName: string) {
     if (connected && wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(
         JSON.stringify({
+          type: 'auth:identify',
+          payload: { userId, userName: userNameRef.current },
+        })
+      );
+    }
+  }, [userId, connected]);
+
+  useEffect(() => {
+    if (connected && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
           type: 'auth:rename',
           payload: { userName },
         })
